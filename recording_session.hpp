@@ -8,7 +8,7 @@
 #include <vector>
 #include <memory>
 #include "utils.hpp"
-#include "event.hpp" 
+#include "event.hpp"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -20,9 +20,9 @@ class RecordingSession {
 public:
     using OnFinishedCallback = std::function<void(const std::string& cam_id)>;
     
-    RecordingSession(const std::string& cam_id, AVCodecParameters* codec_params,
-                     const std::string& filepath, int max_duration_sec, int max_chunks,
-                     int post_buffer_iframes,
+    RecordingSession(const std::string& cam_id, const std::string& cam_name, const AlarmEvent& evt,
+                     AVCodecParameters* codec_params, const std::string& filepath,
+                     int max_duration_sec, int max_chunks, int post_buffer_iframes,
                      const std::string& on_start_script, const std::string& on_stop_script,
                      const std::string& on_save_script, OnFinishedCallback on_finished);
     ~RecordingSession();
@@ -32,13 +32,17 @@ public:
     bool isFinished() const { return finished_.load(); }
     void pushPacket(const SafePacket& pkt);
     const std::string& getCamId() const { return cam_id_; }
+	void updateEventStatus(const std::string& new_status) {
+    event_data_.status = new_status;}
 
 private:
     void runLoop();
-    void executeScriptAsync(const std::string& tmpl, const AlarmEvent& evt, const std::string& filepath);
+    void executeScriptAsync(const std::string& tmpl, const std::string& filepath);
     bool isIFrame(const AVPacket* pkt) const;
 
     std::string cam_id_;
+    std::string cam_name_;
+    AlarmEvent event_data_; // 🔧 Stores original event for accurate macro expansion
     std::unique_ptr<AVCodecParameters> codec_params_;
     std::string filepath_;
     int max_duration_sec_;
@@ -55,5 +59,4 @@ private:
     std::atomic<int> post_buffer_remaining_{0};
     std::mutex timer_mutex_;
     std::condition_variable timer_cv_;
-    std::vector<std::thread> script_threads_;
 };

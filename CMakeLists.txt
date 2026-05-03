@@ -5,6 +5,28 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# 🔧 Глобальные флаги оптимизации для Release
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    # Максимальная оптимизация под конкретный CPU (-march=native)
+    add_compile_options(-march=native -mtune=native)
+    
+    # Агрессивная оптимизация
+    add_compile_options(-O3)
+    
+    # Link-Time Optimization (LTO)
+    add_compile_options(-flto)
+    add_link_options(-flto)
+    
+    # Отключение assert'ов
+    add_compile_options(-DNDEBUG)
+    
+    # Дополнительные флаги безопасности
+    add_compile_options(-fstack-protector-strong)
+    
+    # Оптимизация размера (опционально, вместо -O3)
+    # add_compile_options(-Os)
+endif()
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG REQUIRED libavformat libavcodec libavutil)
 find_package(Threads REQUIRED)
@@ -21,15 +43,6 @@ add_executable(ivckolpak
     alarm_server.cpp
 )
 
-# Strip executable only in Release mode (avoids CMake parsing warnings)
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    add_custom_command(TARGET ivckolpak POST_BUILD
-        COMMAND ${CMAKE_STRIP} "$<TARGET_FILE:ivckolpak>"
-        COMMENT "Stripping debug symbols from binary"
-        VERBATIM
-    )
-endif()
-
 target_include_directories(ivckolpak PRIVATE ${FFMPEG_INCLUDE_DIRS})
 target_link_directories(ivckolpak PRIVATE ${FFMPEG_LIBRARY_DIRS})
 target_link_libraries(ivckolpak PRIVATE 
@@ -37,3 +50,12 @@ target_link_libraries(ivckolpak PRIVATE
     Threads::Threads 
     nlohmann_json::nlohmann_json
 )
+
+# Strip executable only in Release mode
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_custom_command(TARGET ivckolpak POST_BUILD
+        COMMAND ${CMAKE_STRIP} "$<TARGET_FILE:ivckolpak>"
+        COMMENT "Stripping debug symbols from binary"
+        VERBATIM
+    )
+endif()
