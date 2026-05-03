@@ -6,6 +6,30 @@
 
 ---
 
+## Manual Building
+
+### Debian / Ubuntu
+
+```bash
+# Install build dependencies
+sudo apt install build-essential pkg-config cmake \
+                 libavformat-dev libavcodec-dev libavutil-dev \
+                 nlohmann-json3-dev
+
+# Clone the repository
+git clone https://github.com/denzen84/ivckolpak.git
+cd ivckolpak
+
+# Build
+mkdir Build
+cd Build
+cmake -DCMAKE_BUILD_TYPE=Release .. && make -j$(nproc)
+```
+
+The compiled binary will be located at `Build/ivckolpak`.
+
+---
+
 ## Key Features
 
 ### 1. Keyframe-Accurate Pre-Buffer
@@ -336,14 +360,6 @@ on_video_save=/opt/ivckolpak/upload.sh "%f" "%t"
 | FFmpeg | libavformat, libavcodec, libavutil |
 | nlohmann/json | 3.10.5+ |
 | POSIX Threads | Standard |
-
-### Build Instructions
-
-```bash
-mkdir Build && cd Build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j$(nproc)
-```
 
 ---
 
