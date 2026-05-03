@@ -4,7 +4,7 @@
 
 **ivckolpak** is a high-reliability, low-overhead Network Video Recorder (NVR) designed specifically for RTSP IP cameras operating in **passthrough mode**. The program continuously reads RTSP streams from cameras and saves video to disk only when external events occur (motion detection, alarm triggers, Telegram bot notifications, etc.). Recording is controlled via TCP commands in JSON format.
 
-Unlike traditional NVR solutions that re-encode video streams, ivckolpak works in pure **passthrough mode** — it writes video packets directly to MP4 containers without any transcoding. This means **zero CPU load** from video processing, making it ideal for single-board computers (SBCs) like Raspberry Pi, Orange Pi, DietPi, and other ARM-based devices where every CPU cycle counts.
+Unlike traditional NVR solutions that re-encode video streams, ivckolpak works in pure **passthrough mode** — it writes video packets directly to MP4 containers without any transcoding. This means **zero CPU load** from video processing, making it ideal for single-board computers (SBCs) like Raspberry Pi, Orange Pi, and other ARM-based devices where every CPU cycle counts.
 
 ## Why ivckolpak Was Created
 
