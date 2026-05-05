@@ -72,7 +72,6 @@ int main(int argc, char* argv[]) {
         cc.on_stop = cfg.getString("camera", "on_event_stop", "", i);
         cc.on_save = cfg.getString("camera", "on_video_save", "", i);
         
-
         cc.on_rtsp_lost = cfg.getString("camera", "on_rtsp_lost", "", i);
         cc.on_rtsp_found = cfg.getString("camera", "on_rtsp_found", "", i);
         
@@ -111,7 +110,7 @@ int main(int argc, char* argv[]) {
 }
 
 // ============================================================================
-// Definition of static members for ScriptRunner
+// Definition of static members for ScriptRunner (MUST be in ONE translation unit)
 // ============================================================================
 std::mutex ScriptRunner::mutex_;
 std::vector<std::thread> ScriptRunner::threads_;

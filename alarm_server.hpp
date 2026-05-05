@@ -15,8 +15,8 @@ public:
 
     void start();
     void stop();
-    bool popEvent(AlarmEvent& evt);
-    void wakeUp();  
+    bool popEvent(AlarmEvent& evt);  // 🔧 Encapsulated event retrieval
+    void wakeUp();                    // 🔧 Wake up waiting thread
 
 private:
     void run();

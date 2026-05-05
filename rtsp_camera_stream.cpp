@@ -55,8 +55,28 @@ void RtspCameraStream::notifyStatusChanged(bool connected) {
     bool old_state = connected_.exchange(connected);
     if (old_state != connected && on_status_changed_) {
         DEBUG_LOG("RTSP status changed: connected=" << connected);
+        if (!connected) {
+            std::lock_guard<std::mutex> lock(buf_mtx_);
+            buffer_.clear();
+            buffer_dur_ = 0;
+            DEBUG_LOG("Buffer cleared on RTSP loss");
+        }
         on_status_changed_(connected);
     }
+}
+
+std::unique_ptr<AVCodecParameters> RtspCameraStream::getCodecParamsCopy() const {
+    std::shared_lock<std::shared_mutex> lock(ctx_mutex_);
+    if (!fmt_ctx_ || video_stream_idx_ < 0 || 
+        video_stream_idx_ >= static_cast<int>(fmt_ctx_->nb_streams)) {
+        return nullptr;
+    }
+    auto params = std::unique_ptr<AVCodecParameters>(avcodec_parameters_alloc());
+    if (!params || avcodec_parameters_copy(params.get(), 
+            fmt_ctx_->streams[video_stream_idx_]->codecpar) < 0) {
+        return nullptr;
+    }
+    return params;
 }
 
 bool RtspCameraStream::open() {
@@ -83,10 +103,9 @@ bool RtspCameraStream::open() {
         char errbuf[256];
         av_strerror(ret, errbuf, sizeof(errbuf));
         DEBUG_LOG("avformat_open_input failed: " << errbuf);
-        avformat_free_context(fmt_ctx_);
         fmt_ctx_ = nullptr;
         av_dict_free(&o);
-        notifyStatusChanged(false);  
+        notifyStatusChanged(false);
         return false;
     }
     av_dict_free(&o);
@@ -97,7 +116,7 @@ bool RtspCameraStream::open() {
         DEBUG_LOG("avformat_find_stream_info failed");
         avformat_close_input(&fmt_ctx_);
         fmt_ctx_ = nullptr;
-        notifyStatusChanged(false);  
+        notifyStatusChanged(false);
         return false;
     }
     
@@ -107,13 +126,11 @@ bool RtspCameraStream::open() {
         DEBUG_LOG("No video stream found");
         avformat_close_input(&fmt_ctx_);
         fmt_ctx_ = nullptr;
-        notifyStatusChanged(false);  
+        notifyStatusChanged(false);
         return false;
     }
     
     time_base_ = fmt_ctx_->streams[video_stream_idx_]->time_base;
-    
-
     notifyStatusChanged(true);
     DEBUG_LOG("open() succeeded, time_base = " << time_base_.num << "/" << time_base_.den);
     return true;
@@ -143,23 +160,24 @@ void RtspCameraStream::run() {
         }
 
         DEBUG_LOG("Entering read loop...");
-        bool read_error = false;
         
         while (!should_stop_ && av_read_frame(fmt_ctx_, pkt) >= 0) {
             if (pkt->stream_index == video_stream_idx_) {
                 bool is_key = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
                 double dur = (pkt->duration > 0) ? pkt->duration * av_q2d(time_base_) : 0.05;
-                {
-                    std::lock_guard<std::mutex> lock(buf_mtx_);
-                    SafePacket copy(av_packet_clone(pkt));
-                    if (!copy.empty()) {
-                        buffer_.push_back({copy, is_key, dur});
+                
+                // 🔧 FIX: Clone ONCE and reuse via shared_ptr (cheap copy)
+                SafePacket cloned(av_packet_clone(pkt));
+                if (!cloned.empty()) {
+                    {
+                        std::lock_guard<std::mutex> lock(buf_mtx_);
+                        buffer_.push_back({cloned, is_key, dur});
                         buffer_dur_ += dur;
+                        if (is_key) trimBuffer();
                     }
-                    if (is_key) trimBuffer();
-                }
-                if (on_packet_) {
-                    on_packet_(SafePacket(av_packet_clone(pkt)));
+                    if (on_packet_) {
+                        on_packet_(cloned);  // 🔧 Pass the SAME cloned packet
+                    }
                 }
             }
             av_packet_unref(pkt);
@@ -206,6 +224,12 @@ void RtspCameraStream::trimBuffer() {
         buffer_dur_ -= buffer_.front().dur;
         buffer_.pop_front();
     }
+    
+    // 🔧 Additional limit by total packet count
+    while (buffer_.size() > MAX_BUFFER_PACKETS) {
+        buffer_dur_ -= buffer_.front().dur;
+        buffer_.pop_front();
+    }
 }
 
 std::vector<SafePacket> RtspCameraStream::getBufferSafe() const {
@@ -213,14 +237,4 @@ std::vector<SafePacket> RtspCameraStream::getBufferSafe() const {
     std::vector<SafePacket> res;
     for (auto& p : buffer_) res.push_back(p.data);
     return res;
-}
-
-AVFormatContext* RtspCameraStream::getCtx() const {
-    std::shared_lock<std::shared_mutex> lock(ctx_mutex_);
-    return fmt_ctx_;
-}
-
-int RtspCameraStream::getVideoIdx() const {
-    std::shared_lock<std::shared_mutex> lock(ctx_mutex_);
-    return video_stream_idx_;
 }

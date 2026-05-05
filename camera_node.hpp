@@ -18,7 +18,8 @@ public:
     void stop();
     
     void addSession(std::shared_ptr<RecordingSession> s);
-    void setOnRtspStatusChanged(OnRtspStatusCallback cb) { on_rtsp_status_ = std::move(cb); } 
+    void cleanupFinishedSessions();  // 🔧 New method for periodic cleanup
+    void setOnRtspStatusChanged(OnRtspStatusCallback cb) { on_rtsp_status_ = std::move(cb); }
     
     std::vector<SafePacket> getPreBuffer() const;
     std::unique_ptr<AVCodecParameters> getCodecParamsCopy() const;
@@ -32,5 +33,5 @@ private:
     RtspCameraStream stream_;
     std::vector<std::shared_ptr<RecordingSession>> sessions_;
     mutable std::mutex sessions_mtx_;
-    OnRtspStatusCallback on_rtsp_status_;  
+    OnRtspStatusCallback on_rtsp_status_;
 };

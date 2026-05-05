@@ -7,7 +7,6 @@ CameraNode::CameraNode(const std::string& id, const std::string& url, const std:
                        const std::string& ip, int bf)
     : id_(id), serial_id_(serial), ip_address_(ip), stream_(url, bf) {
     
-
     stream_.setOnPacket([this](const SafePacket& pkt) {
         if (!pkt.get()) return;
         
@@ -15,6 +14,7 @@ CameraNode::CameraNode(const std::string& id, const std::string& url, const std:
         for (auto& s : sessions_) {
             s->pushPacket(pkt);
         }
+        // Cleanup finished sessions on every packet (also done periodically)
         sessions_.erase(
             std::remove_if(sessions_.begin(), sessions_.end(),
                 [](const auto& s){ return s->isFinished(); }),
@@ -22,7 +22,6 @@ CameraNode::CameraNode(const std::string& id, const std::string& url, const std:
         );
     });
     
-
     stream_.setOnStatusChanged([this](bool connected) {
         DEBUG_LOG("CameraNode: RTSP status changed for " << id_ << ", connected=" << connected);
         if (on_rtsp_status_) {
@@ -49,16 +48,24 @@ void CameraNode::addSession(std::shared_ptr<RecordingSession> s) {
     DEBUG_LOG("Session added, count=" << sessions_.size());
 }
 
+void CameraNode::cleanupFinishedSessions() {
+    std::lock_guard<std::mutex> l(sessions_mtx_);
+    auto before = sessions_.size();
+    sessions_.erase(
+        std::remove_if(sessions_.begin(), sessions_.end(),
+            [](const auto& s){ return s->isFinished(); }),
+        sessions_.end()
+    );
+    if (sessions_.size() < before) {
+        DEBUG_LOG("CameraNode::cleanupFinishedSessions: removed " 
+                  << (before - sessions_.size()) << " finished sessions");
+    }
+}
+
 std::vector<SafePacket> CameraNode::getPreBuffer() const { 
     return stream_.getBufferSafe(); 
 }
 
 std::unique_ptr<AVCodecParameters> CameraNode::getCodecParamsCopy() const {
-    AVFormatContext* ctx = stream_.getCtx();
-    int idx = stream_.getVideoIdx();
-    if (!ctx || idx < 0) return nullptr;
-    
-    auto params = std::unique_ptr<AVCodecParameters>(avcodec_parameters_alloc());
-    if (avcodec_parameters_copy(params.get(), ctx->streams[idx]->codecpar) < 0) return nullptr;
-    return params;
+    return stream_.getCodecParamsCopy();
 }

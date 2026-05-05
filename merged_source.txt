@@ -1,0 +1,22 @@
+Объединение исходных файлов проекта.
+Создано: 05.05.2026 21:06:38,45
+
+===== END OF FILE (alarm_server.cpp
+===== END OF FILE (camera_manager.cpp
+===== END OF FILE (camera_node.cpp
+===== END OF FILE (config_parser.cpp
+===== END OF FILE (main.cpp
+===== END OF FILE (recording_session.cpp
+===== END OF FILE (rtsp_camera_stream.cpp
+===== END OF FILE (video_recorder.cpp
+===== END OF FILE (alarm_server.hpp
+===== END OF FILE (camera_manager.hpp
+===== END OF FILE (camera_node.hpp
+===== END OF FILE (config_parser.hpp
+===== END OF FILE (event.hpp
+===== END OF FILE (recording_session.hpp
+===== END OF FILE (rtsp_camera_stream.hpp
+===== END OF FILE (utils.hpp
+===== END OF FILE (video_recorder.hpp
+===== END OF FILE (CMakeLists.txt
+

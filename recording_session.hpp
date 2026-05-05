@@ -29,11 +29,10 @@ public:
 
     void start(std::vector<SafePacket> prebuffer);
     void requestStop();
+    void updateEventStatus(const std::string& new_status);
     bool isFinished() const { return finished_.load(); }
     void pushPacket(const SafePacket& pkt);
     const std::string& getCamId() const { return cam_id_; }
-	void updateEventStatus(const std::string& new_status) {
-    event_data_.status = new_status;}
 
 private:
     void runLoop();
@@ -42,7 +41,7 @@ private:
 
     std::string cam_id_;
     std::string cam_name_;
-    AlarmEvent event_data_; // 🔧 Stores original event for accurate macro expansion
+    AlarmEvent event_data_;
     std::unique_ptr<AVCodecParameters> codec_params_;
     std::string filepath_;
     int max_duration_sec_;

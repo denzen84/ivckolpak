@@ -10,6 +10,7 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <algorithm>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -46,6 +47,7 @@ static inline std::string sanitizeFilename(const std::string& name) {
     return result;
 }
 
+// 🔧 Thread-safe packet wrapper using shared_ptr to avoid deep cloning
 struct SafePacket {
     std::shared_ptr<AVPacket> ptr;
     SafePacket() = default;
@@ -58,24 +60,38 @@ struct SafePacket {
     bool empty() const { return !ptr; }
 };
 
+// 🔧 Safe background script executor with lazy cleanup
 class ScriptRunner {
 public:
     static void run(const std::string& cmd) {
         DEBUG_LOG("ScriptRunner::run: " << cmd);
-        static std::atomic<uint64_t> call_count{0};
-        uint64_t cnt = ++call_count;
-        std::lock_guard<std::mutex> lock(mutex_);
-        threads_.emplace_back([cmd, cnt]() {
-            DEBUG_LOG("Script thread #" << cnt << " started");
-            int ret = std::system(cmd.c_str());
-            DEBUG_LOG("Script thread #" << cnt << " exited with code " << ret);
-            if (ret != 0) std::cerr << "[" << getTimestamp() << "] [ScriptRunner] Failed (code " << ret << "): " << cmd << "\n";
-        });
+        // Lazy cleanup of finished threads inside single lock
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            threads_.erase(
+                std::remove_if(threads_.begin(), threads_.end(),
+                    [](const std::thread& t){ return !t.joinable(); }),
+                threads_.end()
+            );
+            threads_.emplace_back([cmd]() {
+                DEBUG_LOG("Script thread started: " << cmd);
+                int ret = std::system(cmd.c_str());
+                DEBUG_LOG("Script thread exited with code: " << ret);
+                if (ret != 0) {
+                    std::cerr << "[" << getTimestamp() << "] [ScriptRunner] Command failed (code " << ret << "): " << cmd << "\n";
+                }
+            });
+        }
     }
     static void joinAll() {
         DEBUG_LOG("ScriptRunner::joinAll called");
         std::lock_guard<std::mutex> lock(mutex_);
-        for (auto& t : threads_) if (t.joinable()) t.join();
+        for (auto& t : threads_) {
+            if (t.joinable()) {
+                DEBUG_LOG("Joining script thread...");
+                t.join();
+            }
+        }
         threads_.clear();
         DEBUG_LOG("ScriptRunner::joinAll done");
     }
@@ -84,7 +100,7 @@ private:
     static std::vector<std::thread> threads_;
 };
 
-// 🔧 UNIFIED MACRO ENGINE
+// 🔧 UNIFIED MACRO ENGINE - all macro expansion goes through this
 struct MacroContext {
     std::string camera_id;
     std::string camera_name;
@@ -98,8 +114,8 @@ struct MacroContext {
     std::string alarm_type;
     std::string filepath;
     std::time_t timestamp = 0;
-    std::string rtsp_status; // "connected" / "disconnected"
-    std::string rtsp_event;  // "rtsp_found" / "rtsp_lost"
+    std::string rtsp_status;      // "connected" / "disconnected"
+    std::string rtsp_event;       // "rtsp_found" / "rtsp_lost"
 };
 
 inline std::string applyMacros(const std::string& tmpl, const MacroContext& ctx) {
@@ -107,7 +123,7 @@ inline std::string applyMacros(const std::string& tmpl, const MacroContext& ctx)
     std::string result = tmpl;
 
     auto replace = [&](const std::string& key, const std::string& value) {
-        if (value.empty()) return; // Skip empty values to preserve irrelevant macros (e.g. %{event} in event scripts)
+        if (value.empty()) return; // Skip empty values to preserve macros that aren't relevant
         size_t pos = 0;
         while ((pos = result.find(key, pos)) != std::string::npos) {
             result.replace(pos, key.length(), value);

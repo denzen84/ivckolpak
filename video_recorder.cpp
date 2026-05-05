@@ -43,14 +43,25 @@ void VideoRecorder::push(SafePacket pkt) {
     if (!is_recording_.load() || pkt.empty()) return;
     { 
         std::lock_guard<std::mutex> l(queue_mutex_); 
-        write_queue_.push_back(std::move(pkt)); 
+        if (write_queue_.size() >= MAX_QUEUE_SIZE) {
+            write_queue_.pop_front();  // Drop oldest packet
+        }
+        write_queue_.push_back(std::move(pkt));  // 🔧 Move, not copy
     }
     queue_cv_.notify_one();
 }
 
 bool VideoRecorder::stop() {
     if (!is_recording_.load()) return true;
-    should_stop_ = true; queue_cv_.notify_all();
+    should_stop_ = true;
+    queue_cv_.notify_all();
+    
+    // 🔧 Wait for queue to empty using condition variable
+    {
+        std::unique_lock<std::mutex> l(queue_mutex_);
+        empty_cv_.wait(l, [this]{ return write_queue_.empty(); });
+    }
+    
     if (writer_thread_.joinable()) writer_thread_.join();
     writeTrailer();
     std::error_code ec; std::filesystem::rename(temp_path_, output_path_, ec);
@@ -63,21 +74,19 @@ void VideoRecorder::writeLoop() {
         SafePacket pkt;
         {
             std::unique_lock<std::mutex> l(queue_mutex_);
-            // 🔧 Wait until data arrives OR stop is requested
             queue_cv_.wait(l, [this]{ return !write_queue_.empty() || should_stop_.load(); });
             
-            // 🔧 Clear exit logic: if queue is empty, we're done (stop was signaled)
             if (write_queue_.empty()) {
+                empty_cv_.notify_all();
                 break;
             }
-            
             pkt = std::move(write_queue_.front());
             write_queue_.pop_front();
         }
-        // 🔧 pkt is guaranteed to be non-empty here
-        rebasePacket(pkt.get());
-        av_interleaved_write_frame(out_fmt_ctx_, pkt.get());
-        // pkt auto-destructs (shared_ptr cleanup)
+        if (pkt.get()) { 
+            rebasePacket(pkt.get()); 
+            av_interleaved_write_frame(out_fmt_ctx_, pkt.get()); 
+        }
     }
 }
 

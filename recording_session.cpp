@@ -46,6 +46,10 @@ void RecordingSession::requestStop() {
     timer_cv_.notify_all();
 }
 
+void RecordingSession::updateEventStatus(const std::string& new_status) {
+    event_data_.status = new_status;
+}
+
 bool RecordingSession::isIFrame(const AVPacket* pkt) const {
     return pkt && (pkt->flags & AV_PKT_FLAG_KEY);
 }
@@ -90,17 +94,16 @@ void RecordingSession::runLoop() {
         executeScriptAsync(on_save_, new_path);
     }
 
-	if (recorder_) recorder_->stop();
-	executeScriptAsync(on_stop_, filepath_);
-	executeScriptAsync(on_save_, filepath_);  
-	finished_.store(true);
-	if (on_finished_) on_finished_(cam_id_);
-	}
+    if (recorder_) recorder_->stop();
+    executeScriptAsync(on_stop_, filepath_);
+    executeScriptAsync(on_save_, filepath_);  // 🔧 Final on_save call
+    finished_.store(true);
+    if (on_finished_) on_finished_(cam_id_);
+}
 
 void RecordingSession::executeScriptAsync(const std::string& tmpl, const std::string& path) {
     if (tmpl.empty()) return;
 
-    // 🔧 Build context dynamically from stored event data + current time
     MacroContext ctx;
     ctx.camera_id = cam_id_;
     ctx.camera_name = cam_name_;
@@ -114,7 +117,6 @@ void RecordingSession::executeScriptAsync(const std::string& tmpl, const std::st
     ctx.alarm_type = event_data_.alarm_type;
     ctx.filepath = path;
     ctx.timestamp = std::time(nullptr);
-    // RTSP fields remain empty -> macros %{event} and %{status} stay untouched
 
     std::string cmd = applyMacros(tmpl, ctx);
     std::cout << "[" << getTimestamp() << "] [Session] Executing async: " << cmd << "\n";

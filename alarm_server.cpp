@@ -188,7 +188,9 @@ void AlarmServer::processBuffer() {
                 evt.channel = j.value("Channel", 0);
                 evt.serial_id = j.value("SerialID", "");
                 evt.address = j.value("Address", "");
-                evt.camera_id = evt.serial_id;  
+                evt.camera_id = evt.serial_id;  // 🔧 Critical: map SerialID to camera_id
+                
+                // 🔧 New fields from JSON for macros
                 evt.description = j.value("Descrip", "");
                 evt.start_time = j.value("StartTime", "");
                 evt.alarm_type = j.value("Type", "");

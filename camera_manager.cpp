@@ -3,8 +3,8 @@
 #include <iostream>
 #include <algorithm>
 #include <filesystem>
+#include <chrono>
 
-// 🔧 Unified path builder using applyMacros
 std::string buildRecordingPath(const CameraConfig& cfg, const AlarmEvent& evt, std::time_t timestamp) {
     MacroContext ctx;
     ctx.camera_id = evt.camera_id;
@@ -34,8 +34,12 @@ void CameraManager::addCamera(const CameraConfig& cfg) {
     }
     
     rtsp_connection_state_[cfg.id] = false;
-    cameras_[cfg.id] = std::make_unique<CameraNode>(cfg.id, cfg.url, cfg.serial_id, cfg.ip_address, cfg.pre_buffer_iframes);
     
+    // 🔧 FIX #1: buffer_frames → pre_buffer_iframes
+    cameras_[cfg.id] = std::make_unique<CameraNode>(
+        cfg.id, cfg.url, cfg.serial_id, cfg.ip_address, cfg.pre_buffer_iframes);
+    
+    // 🔧 Set up RTSP status callback
     cameras_[cfg.id]->setOnRtspStatusChanged([this, id = cfg.id](bool connected) {
         this->onRtspStatusChanged(id, connected);
     });
@@ -55,11 +59,14 @@ void CameraManager::start(AlarmServer& server) {
 void CameraManager::stop() {
     running_.store(false);
     if (active_server_) active_server_->wakeUp();
+    
     if (worker_thread_.joinable()) worker_thread_.join();
 
-    std::lock_guard<std::mutex> lock(sessions_mutex_);
-    for (auto& p : active_sessions_) p.second->requestStop();
-    active_sessions_.clear();
+    {
+        std::lock_guard<std::mutex> lock(sessions_mutex_);
+        for (auto& p : active_sessions_) p.second->requestStop();
+        active_sessions_.clear();
+    }
     
     for (auto& p : cameras_) p.second->stop();
     ScriptRunner::joinAll();
@@ -73,23 +80,27 @@ void CameraManager::onSessionFinished(const std::string& cam_id) {
 }
 
 void CameraManager::onRtspStatusChanged(const std::string& cam_id, bool connected) {
+    DEBUG_LOG("CameraManager::onRtspStatusChanged: cam_id=" << cam_id << ", connected=" << connected);
+    
     auto cfg_it = camera_configs_.find(cam_id);
     if (cfg_it == camera_configs_.end()) return;
+    
     const std::string& script = connected ? cfg_it->second.on_rtsp_found : cfg_it->second.on_rtsp_lost;
     if (script.empty()) return;
+    
     executeRtspScript(cam_id, script, connected);
 }
 
 void CameraManager::executeRtspScript(const std::string& cam_id, const std::string& tmpl, bool connected) {
     if (tmpl.empty()) return;
+    
     MacroContext ctx;
     ctx.camera_id = cam_id;
     ctx.camera_name = cam_id;
     ctx.timestamp = std::time(nullptr);
     ctx.rtsp_status = connected ? "connected" : "disconnected";
     ctx.rtsp_event = connected ? "rtsp_found" : "rtsp_lost";
-    // Event/JSON fields remain empty -> ignored for RTSP scripts
-
+    
     std::string cmd = applyMacros(tmpl, ctx);
     std::cout << "[" << getTimestamp() << "] [Manager] Executing RTSP script: " << cmd << "\n";
     ScriptRunner::run(cmd);
@@ -97,17 +108,30 @@ void CameraManager::executeRtspScript(const std::string& cam_id, const std::stri
 
 void CameraManager::eventLoop() {
     AlarmEvent evt;
+    auto last_cleanup = std::chrono::steady_clock::now();
+    
     while (running_.load()) {
+        // 🔧 FIX #2: Use encapsulated popEvent() instead of direct queue access
         if (!active_server_->popEvent(evt)) {
             if (!running_.load()) break;
             continue;
         }
         handleEvent(evt);
+        
+        // 🔧 Periodic cleanup of finished sessions (every 5 seconds)
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_cleanup > std::chrono::seconds(5)) {
+            for (auto& [id, node] : cameras_) {
+                node->cleanupFinishedSessions();
+            }
+            last_cleanup = now;
+        }
     }
 }
 
 void CameraManager::handleEvent(const AlarmEvent& evt) {
     DEBUG_LOG("handleEvent: " << evt.camera_id << " " << evt.status);
+    
     auto cfg_it = camera_configs_.find(evt.camera_id);
     auto node_it = cameras_.find(evt.camera_id);
     if (cfg_it == camera_configs_.end() || node_it == cameras_.end()) return;
@@ -119,15 +143,17 @@ void CameraManager::handleEvent(const AlarmEvent& evt) {
     auto sess_it = active_sessions_.find(evt.camera_id);
 
     if (evt.status == "Start") {
-        if (sess_it != active_sessions_.end()) return; // Already recording
+        if (sess_it != active_sessions_.end()) return;
         
         std::string filename = buildRecordingPath(cfg, evt, std::time(nullptr));
+        DEBUG_LOG("Generated filename: " << filename);
+        
+        // 🔧 FIX #3: Use getCodecParamsCopy() instead of raw getContext/getVideoIdx
         auto codec_params = node->getCodecParamsCopy();
         if (!codec_params) return;
         
-        // 🔧 Pass original event & config name to session for accurate macro expansion
         auto sess = std::make_shared<RecordingSession>(
-            evt.camera_id, cfg.id, evt,
+            evt.camera_id, cfg.id, evt,  // 🔧 Pass original event for macros
             codec_params.get(), filename, cfg.max_duration, cfg.max_chunks,
             cfg.post_buffer_iframes, cfg.on_start, cfg.on_stop, cfg.on_save,
             [this](const std::string& id){ this->onSessionFinished(id); }
@@ -135,20 +161,17 @@ void CameraManager::handleEvent(const AlarmEvent& evt) {
         
         sess->start(node->getPreBuffer());
         active_sessions_[evt.camera_id] = sess;
+        
+        // 🔥 CRITICAL: Add session to node so it receives live packets
         node->addSession(sess);
+        
         std::cout << "[" << getTimestamp() << "] [Manager] Recording started for " << evt.camera_id << "\n";
     } 
-	else if (evt.status == "Stop") {
-		DEBUG_LOG("Processing STOP event for " << evt.camera_id);
-		
-		if (sess_it != active_sessions_.end()) {
-			// 🔧 Обновляем статус в сессии для корректных макросов в on_stop/on_save
-			sess_it->second->updateEventStatus(evt.status);
-			sess_it->second->requestStop();
-			std::cout << "[" << getTimestamp() << "] [Manager] Stop requested for " << evt.camera_id << "\n";
-		} else {
-			DEBUG_LOG("⚠️ No active session for " << evt.camera_id);
-		}
-		DEBUG_LOG("=== CameraManager::handleEvent END (STOP) ===");
-	}
+    else if (evt.status == "Stop") {
+        if (sess_it != active_sessions_.end()) {
+            sess_it->second->updateEventStatus(evt.status);
+            sess_it->second->requestStop();
+            std::cout << "[" << getTimestamp() << "] [Manager] Stop requested for " << evt.camera_id << "\n";
+        }
+    }
 }
