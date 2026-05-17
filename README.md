@@ -1,351 +1,282 @@
-# ivckolpak — Lightweight Passthrough NVR for RTSP Cameras
+# 📹 ivckolpak — Lightweight Passthrough NVR for RTSP Cameras
 
-## Overview
+## 🚀 Overview
 
-**ivckolpak** is a high-reliability, low-overhead Network Video Recorder (NVR) designed specifically for RTSP IP cameras operating in **passthrough mode**. The program continuously reads RTSP streams from cameras and saves video to disk only when external events occur (motion detection, alarm triggers, Telegram bot notifications, etc.). Recording is controlled via TCP commands in JSON format.
+**ivckolpak** is a high-reliability, low-overhead Network Video Recorder (NVR) designed specifically for RTSP IP cameras operating in **true passthrough mode**. The application continuously reads RTSP streams and writes video packets directly to MP4 containers **without any decoding, re-encoding, or frame processing**. Recording is triggered exclusively by external JSON events received via TCP (AlarmServer), making it ideal for integration with camera-native analytics, VMS systems, or custom bots.
 
-Unlike traditional NVR solutions that re-encode video streams, ivckolpak works in pure **passthrough mode** — it writes video packets directly to MP4 containers without any transcoding. This means **zero CPU load** from video processing, making it ideal for single-board computers (SBCs) like Raspberry Pi, Orange Pi, and other ARM-based devices where every CPU cycle counts.
+### ✨ Key Advantages
 
-## Why ivckolpak Was Created
-
-The author had been using the popular **Motion** package for years to handle IP camera recordings integrated with Telegram bots. While Motion is a capable tool, it has several fundamental limitations that prevented it from fully utilizing the potential of modern SBC computers:
-
-- **Motion re-encodes video streams**, consuming significant CPU resources even when no processing is needed
-- **No native passthrough mode** — every frame goes through unnecessary decoding and re-encoding
-- **Limited I-frame aware buffering** — recordings often start mid-GOP, producing corrupted or unplayable videos
-- **Heavy resource footprint** — struggles on ARM-based SBCs with multiple camera streams
-- **Complex configuration** for simple event-triggered recording scenarios
-- **No built-in support for JSON-based external triggers** from systems like Telegram bots
-
-**ivckolpak** was developed through **vibe-coding** to address these shortcomings. It provides:
-
-- ✅ **True passthrough recording** — zero transcoding, near-zero CPU usage
-- ✅ **Keyframe-accurate buffering** — recordings always start and end on I-frames
-- ✅ **Minimal resource footprint** — runs comfortably on low-power ARM SBCs
-- ✅ **Native JSON/TCP trigger interface** — perfect for Telegram bot integration
-- ✅ **Clean, modern C++17 codebase** — easy to audit, modify, and extend
+| Feature | Benefit |
+|---------|---------|
+| **True Hardware Passthrough** | Zero CPU load from video processing — packets flow RTSP → MP4 unchanged |
+| **Camera-Native Event Detection** | No software motion analysis; relies on camera's own PIR/AI analytics via AlarmServer |
+| **I-Frame Accurate Buffering** | Pre/post-buffers measured in keyframes guarantee clean, playable recordings |
+| **Modern C++20 Architecture** | `std::jthread`, `std::stop_token`, move semantics, packet pooling for efficiency |
+| **ARM-Optimized Build System** | CMake flags for RK3308/RK3566/S905Y2/RK3399 with LTO and aggressive tuning |
+| **Config Inheritance Model** | `[global]` defaults automatically overridden by per-`[camera]` settings |
+| **Thread-Safe Zero-Copy Stats** | Real-time monitoring without locking overhead or memory copies |
+| **Graceful Degradation** | RTSP reconnect with exponential backoff, timeout protection, clean shutdown |
 
 ---
 
-## Manual Building
+## 🛠️ Building & Installation
 
-### Debian / Ubuntu
-
+### Dependencies (Debian/Ubuntu)
 ```bash
-# Install build dependencies
 sudo apt install build-essential pkg-config cmake \
                  libavformat-dev libavcodec-dev libavutil-dev \
                  nlohmann-json3-dev
+```
 
-# Clone the repository
+### Standard Build
+```bash
 git clone https://github.com/denzen84/ivckolpak.git
 cd ivckolpak
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc)
+```
+Binary output: `build/bin/ivckolpak`
 
-# Build
-mkdir Build
-cd Build
-cmake -DCMAKE_BUILD_TYPE=Release .. && make -j$(nproc)
+### 🎯 ARM Optimization Options (Optional)
+
+For maximum performance on embedded ARM SoCs, enable aggressive optimization flags:
+
+```bash
+# Native build (auto-detect host CPU)
+cmake -DCMAKE_BUILD_TYPE=Release -DENABLE_AGGRESSIVE_OPT=ON -DTARGET_CPU=native ..
+
+# Cross-compile for specific SoC
+cmake -DCMAKE_BUILD_TYPE=Release -DENABLE_AGGRESSIVE_OPT=ON -DTARGET_CPU=rk3566 ..
+
+# Universal ARMv8-A compatible build
+cmake -DCMAKE_BUILD_TYPE=Release -DENABLE_AGGRESSIVE_OPT=ON -DTARGET_CPU=armv8_generic ..
 ```
 
-The compiled binary will be located at `Build/ivckolpak`.
+| TARGET_CPU | Recommended For | Compiler Flags Applied |
+|------------|----------------|------------------------|
+| `native` | Build on target device | `-march=native -mtune=native` |
+| `rk3308` / `s905y2` | Cortex-A35 devices | `-mcpu=cortex-a35` |
+| `rk3566` | Cortex-A55 devices (universal baseline) | `-mcpu=cortex-a55` |
+| `rk3399` | big.LITTLE (tune for A72 cores) | `-mcpu=cortex-a72` |
+| `armv8_generic` | Maximum compatibility | `-march=armv8-a -mtune=generic-aarch64` |
 
-### Other Linux Distributions
+**Release builds automatically:**
+- Enable `-O3`, `-ffast-math`, `-flto` (Link-Time Optimization)
+- Strip debug symbols (`-s`) for minimal binary size
+- Apply architecture-specific tuning via `-mcpu`
 
-Ensure the following dependencies are installed:
-- **CMake** ≥ 3.14
-- **GCC** or **Clang** with C++17 support
-- **FFmpeg** development libraries (`libavformat`, `libavcodec`, `libavutil`)
-- **nlohmann/json** ≥ 3.10.5
-- **POSIX Threads**
-
-Then follow the same build steps as above.
+> ⚠️ **Note:** `-march=native` works **only** for native compilation. Use specific `TARGET_CPU` values for cross-compilation.
 
 ---
 
-## Key Features
+## ⚙️ Command-Line Options
 
-### 1. True Passthrough Recording (Zero Transcoding)
+| Option | Description |
+|--------|-------------|
+| `-c <file>`, `--config <file>` | Path to configuration file (default: `ivckolpak.ini`) |
+| `-s`, `--silent` | Disable all console logging (equivalent to `disable_logs=yes` in config) |
+| `--help-full` | Display detailed INI format, all options, and macro reference |
+| `-h`, `--help` | Show brief help and exit |
 
-> **This is the defining architectural advantage.**
+**Examples:**
+```bash
+# Run with custom config
+./ivckolpak --config /etc/ivckolpak/custom.ini
 
-ivckolpak never re-encodes video. It reads H.264/H.265 packets from the RTSP stream and writes them directly to MP4 containers, only adjusting PTS timestamps to maintain proper playback timing. This results in:
-- **Near-zero CPU usage** — limited to network I/O and disk writes
-- **No quality loss** — the recorded video is bit-for-bit identical to the camera's original stream
-- **Minimal latency** — no encoding pipeline delay
+# Silent mode (no console output)
+./ivckolpak --silent
 
-### 2. Keyframe-Accurate Pre-Buffer
-
-Traditional NVRs store a fixed number of seconds or packets in their buffer. This causes recordings to start with B/P-frames that cannot be decoded without a preceding I-frame, resulting in corrupted video.
-
-ivckolpak measures its buffer in **I-frame count** (configurable via `pre_buffer_iframes`):
-
-```cpp
-while (kf > buffer_frames_) {
-    if (buffer_.front().is_key) kf--;
-    buffer_.pop_front();
-}
-while (!buffer_.empty() && !buffer_.front().is_key) {
-    buffer_.pop_front();  // Removes non-key frames before the first I-frame
-}
+# View full documentation
+./ivckolpak --help-full
 ```
-
-**Result:** Recording always starts with a keyframe, ensuring compatibility with any media player and artifact-free playback.
-
-### 3. Intelligent Post-Buffer on Stop
-
-When a "Stop" command is received, recording does not stop immediately. The program waits for a configurable number of I-frames (`post_buffer_iframes`), capturing event development after the trigger ends. This is critical for security applications where activity may continue after the alarm clears, and for Telegram bot workflows where delayed notifications may need video context.
-
-### 4. Ideal for Telegram Bot Integration
-
-The TCP/JSON command interface is designed specifically for easy integration with Telegram bots:
-
-```python
-# Example: Trigger recording from a Telegram bot
-import socket
-import json
-
-def start_recording(camera_id):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect(('localhost', 15002))
-    prefix = b'\x00' * 20  # 20-byte binary prefix
-    payload = json.dumps({
-        "Type": "Alarm",
-        "Status": "Start",
-        "Event": "MotionDetect",
-        "SerialID": camera_id
-    }).encode()
-    sock.send(prefix + payload)
-    sock.close()
-```
-
-With notification scripts (`on_event_start`, `on_event_stop`, `on_video_save`), you can:
-- Send Telegram messages when recording starts/stops
-- Upload video files directly to Telegram chats
-- Notify about RTSP connection status changes
-
-### 5. RTSP Reconnection Resilience
-
-On connection loss, the stream automatically reconnects with configurable scripts for `on_rtsp_lost` and `on_rtsp_found` events. Recording sessions are unaffected — they store a copy of codec parameters rather than a pointer to the live context.
-
-### 6. Minimal Packet Copying via SafePacket
-
-A custom `SafePacket` wrapper based on `std::shared_ptr<AVPacket>` enables efficient packet transfer through the pipeline via move semantics. Deep copying only occurs when writing the pre-buffer to file.
-
-### 7. Chunked Recording
-
-Each event can be split into multiple chunks with configurable duration and count. Chunk switching is atomic with no frame loss.
-
-### 8. Unified Macro Engine
-
-22 macros across 6 event contexts for flexible filename formatting and script command construction. See the [Macro System Reference](#macro-system-reference) for complete documentation.
-
-### 9. Deadlock-Free Thread Safety
-
-All shared resources are protected by mutexes with no circular dependencies, verified through multiple audit iterations.
-
-### 10. Graceful Shutdown
-
-Clean termination on SIGINT/SIGTERM with proper cleanup of all threads, completion of current recordings, and joining of background scripts.
 
 ---
 
-## Architecture
+## 📄 Configuration File Format (INI)
 
-```
-┌──────────────┐     JSON/TCP     ┌──────────────┐
-│  Telegram    │ ────────────────→ │ AlarmServer  │
-│  Bot / VMS   │   (port 15002)   │              │
-└──────────────┘                   └──────┬───────┘
-                                          │ event queue
-                                          ▼
-                                   ┌──────────────┐
-                                   │CameraManager │
-                                   │ (orchestrator)│
-                                   └──────┬───────┘
-                                          │
-                          ┌───────────────┼───────────────┐
-                          ▼               ▼               ▼
-                   ┌────────────┐ ┌────────────┐ ┌────────────┐
-                   │ CameraNode │ │ CameraNode │ │ CameraNode │
-                   │  (cam 1)   │ │  (cam 2)   │ │  (cam N)   │
-                   │ RTSP→Passthru│ │ RTSP→Passthru│ │ RTSP→Passthru│
-                   └─────┬──────┘ └─────┬──────┘ └─────┬──────┘
-                         │              │              │
-                    ┌────▼────┐   ┌────▼────┐   ┌────▼────┐
-                    │Session 1│   │Session 2│   │Session N│
-                    │(MP4 out)│   │(MP4 out)│   │(MP4 out)│
-                    └─────────┘   └─────────┘   └─────────┘
-```
+The application uses a standard INI-style configuration with three sections: `[global]`, `[camera]`, and `[alarm_server]`.
 
-**Key principle:** RTSP packets flow through the pipeline **without modification**, only receiving PTS rebasing before being written to the MP4 muxer. No decoding, no encoding, no pixel manipulation.
+### 🔁 Inheritance Model
+All parameters in `[global]` act as **defaults** for every camera. When a parameter is specified inside a `[camera]` section, it **overrides** the global value. If a camera parameter is left empty, `0`, or `0.0`, the system automatically falls back to the `[global]` setting.
 
----
-
-## Macro System Reference
-
-### Summary Table (All Macros × All Contexts)
-
-| Macro | on_event_start | on_event_stop | on_video_save | on_rtsp_lost | on_rtsp_found | filename_format |
-|-------|:---:|:---:|:---:|:---:|:---:|:---:|
-| `%t` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `%$` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `%e` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| `%f` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| `%v` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| `%Y` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `%m` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `%d` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `%H` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `%M` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `%S` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `%T` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `%{json_addr}` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| `%{json_chan}` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| `%{json_desc}` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| `%{json_event}` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| `%{json_serialid}` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| `%{json_starttime}` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| `%{json_status}` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| `%{json_alarm}` | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| `%{status}` | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ |
-| `%{event}` | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ |
-
-### Detailed Macro Descriptions
-
-| Macro | Description | Substitutes |
-|-------|-------------|-------------|
-| `%t` | Camera ID | Camera identifier (e.g., `cam_front_door`) |
-| `%$` | Camera name | Camera name from config (`cfg.id`) |
-| `%e` | Event type | Event type from JSON (`MotionDetect`, `HumanDetect`, etc.) |
-| `%f` | File path | Full path to the recording file |
-| `%v` | Version | Chunk version number |
-| `%Y` | Year | 4-digit year (e.g., `2026`) |
-| `%m` | Month | 2-digit month (`01`–`12`) |
-| `%d` | Day | 2-digit day (`01`–`31`) |
-| `%H` | Hour | 2-digit hour, 24h format (`00`–`23`) |
-| `%M` | Minute | 2-digit minute (`00`–`59`) |
-| `%S` | Second | 2-digit second (`00`–`59`) |
-| `%T` | Full time | `%H:%M:%S` format (`14:30:00`) |
-| `%{json_addr}` | Address | `Address` field from JSON |
-| `%{json_chan}` | Channel | `Channel` field from JSON |
-| `%{json_desc}` | Description | `Descrip` field from JSON |
-| `%{json_event}` | Event | `Event` field from JSON |
-| `%{json_serialid}` | Serial ID | `SerialID` field from JSON |
-| `%{json_starttime}` | Start time | `StartTime` field from JSON |
-| `%{json_status}` | Status | `Status` field from JSON (`"Start"` or `"Stop"`) |
-| `%{json_alarm}` | Alarm type | `Type` field from JSON |
-| `%{status}` | RTSP state | `"connected"` or `"disconnected"` (RTSP scripts only) |
-| `%{event}` | RTSP event | `"rtsp_found"` or `"rtsp_lost"` (RTSP scripts only) |
-
----
-
-## Configuration Parameters Reference
-
-### `[alarmserver]` Section
-
+### 📋 [global] Section
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `port` | int | `15002` | TCP port for receiving alarm commands |
-| `target_dir` | string | `/tmp` | Global recording directory (fallback) |
-| `filename_format` | string | `rec_%t_%Y%m%d_%H%M%S.mp4` | Global filename format with macro support |
+| `pre_buffer_iframes` | int | `3` | I-frames to retain in memory before alarm triggers |
+| `post_buffer_iframes` | int | `2` | I-frames to record after alarm stops |
+| `max_chunk_duration_time_s` | double | `30.0` | Max duration (seconds) per video chunk |
+| `max_event_total_duration_s` | double | `150.0` | Hard timeout for recording event (forces STOP) |
+| `max_chunk_kbytes` | int | `51200` | Max size (KB) per video chunk |
+| `max_event_chunks` | int | `5` | Max number of chunks per alarm event |
+| `reconnect_delay_ms` | int | `3000` | Initial RTSP reconnect delay (ms) |
+| `reconnect_max_delay_ms` | int | `30000` | Max backoff delay for RTSP reconnection |
+| `target_dir` | string | `/mnt/recordings` | Directory for recorded video files |
+| `filename_format` | string | `rec_%{cam_id}_%Y%m%d_%T_v%v_%e.mp4` | Output filename template (supports macros) |
+| `on_event_start` | string | `""` | Shell command executed on recording start |
+| `on_event_stop` | string | `""` | Shell command executed on recording stop |
+| `on_video_save` | string | `""` | Shell command executed when chunk is finalized |
+| `on_rtsp_lost` | string | `""` | Shell command executed on RTSP disconnect |
+| `on_rtsp_found` | string | `""` | Shell command executed on RTSP reconnect |
+| `disable_logs` | bool | `false` | Set to `yes`/`true`/`1`/`on` to disable console output |
 
-### `[camera]` Section (repeatable)
-
+### 📷 [camera] Section (repeatable; required: `name`, `serialid`, `rtsp`)
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `serialid` | string | `cam` + index | Camera unique identifier (must match JSON `SerialID`) |
-| `description` | string | — | Human-readable camera description |
-| `rtsp` | string | — | RTSP stream URL |
-| `pre_buffer_iframes` | int | `3` | Number of I-frames in pre-buffer |
-| `post_buffer_iframes` | int | `0` | Number of I-frames to capture after Stop command |
-| `max_event_duration` | int | `30` | Maximum chunk duration (seconds) |
-| `max_event_chunks` | int | `1` | Maximum number of chunks per event |
-| `target_dir` | string | from `[alarmserver]` | Camera-specific recording directory |
-| `filename_format` | string | from `[alarmserver]` | Camera-specific filename format |
-| `on_event_start` | string | — | Script to run on recording start |
-| `on_event_stop` | string | — | Script to run on recording stop |
-| `on_video_save` | string | — | Script to run when file is saved |
-| `on_rtsp_lost` | string | — | Script to run on RTSP disconnect |
-| `on_rtsp_found` | string | — | Script to run on RTSP reconnect |
+| `name` | string | — | Human-readable camera name |
+| `serialid` | string | — | Unique ID (must match `SerialID` in AlarmServer JSON) |
+| `rtsp` | string | — | Full RTSP stream URL |
+| `rtsp_over_udp` | bool | `false` | Force UDP transport for RTSP (TCP is default) |
+| *[All `[global]` parameters listed above]* | — | — | Override global defaults per camera |
+
+### 🔔 [alarm_server] Section
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `listen_port` | int | `15002` | TCP port for receiving JSON alarm events |
 
 ---
 
-## JSON Command Format (sent to AlarmServer)
+## 🔌 AlarmServer: JSON Command Format
 
-**Note:** Commands are prefixed with 20 bytes of binary data.
+Send TCP packets to `localhost:15002` (or configured port) with raw JSON (no binary prefix required):
 
 ### Start Recording
 ```json
 {
-    "Type": "Alarm",
-    "Status": "Start",
-    "Event": "MotionDetect",
-    "Channel": 0,
-    "SerialID": "cam_front_door",
-    "Address": "192.168.1.100",
-    "Descrip": "Motion detected at front door",
-    "StartTime": "2026-05-03 14:30:00"
+  "Type": "Alarm",
+  "Status": "Start",
+  "Event": "MotionDetect",
+  "Channel": 0,
+  "SerialID": "cam_front_door",
+  "Address": "192.168.1.100",
+  "Descrip": "Motion detected at entrance",
+  "StartTime": "2026-05-18 14:30:00"
 }
 ```
 
 ### Stop Recording
 ```json
 {
-    "Type": "Alarm",
-    "Status": "Stop",
-    "Event": "MotionDetect",
-    "Channel": 0,
-    "SerialID": "cam_front_door",
-    "Address": "192.168.1.100",
-    "Descrip": "Motion cleared at front door",
-    "StartTime": "2026-05-03 14:30:00"
+  "Type": "Alarm",
+  "Status": "Stop",
+  "Event": "MotionDetect",
+  "Channel": 0,
+  "SerialID": "cam_front_door",
+  "Address": "192.168.1.100",
+  "Descrip": "Motion cleared",
+  "StartTime": "2026-05-18 14:30:00"
 }
 ```
 
+**Required fields:** `Type` (must be `"Alarm"`), `Status` (`"Start"`/`"Stop"`), `SerialID` (matches camera `serialid`).
+
 ---
 
-## Running the Application
+## 🧩 Macro System Reference
 
-```bash
-# Production mode (minimal logging)
-./ivckolpak /path/to/ivckolpak.ini -q
+Macros can be used in `filename_format` and external script commands (`on_*` hooks).
 
-# Debug mode (verbose logging)
-./ivckolpak /path/to/ivckolpak.ini --debug
+### ✅ Availability Matrix
 
-# Default config path (looks for ivckolpak.ini in current directory)
-./ivckolpak
+| Macro | Filename | Script (on_*) | Description |
+|-------|:--------:|:-------------:|-------------|
+| `%Y`, `%m`, `%d`, `%H`, `%M`, `%S` | ✅ | ✅ | Date/time components (Year, Month, Day, Hour, Minute, Second) |
+| `%T` | ✅ | ✅ | Full time in `HH:MM:SS` format |
+| `%v` | ✅ | ❌ | Chunk version/index within an event |
+| `%e` | ✅ | ❌ | Sequential Event ID |
+| `%{cam_id}` | ✅ | ✅ | Camera `serialid` |
+| `%{cam_name}` | ✅ | ✅ | Human-readable camera name |
+| `%{cam_ip}` | ✅ | ✅ | IP address from RTSP URL (hex format, e.g., `0xC0A80164`) |
+| `%{json_addr}` | ✅ | ✅ | `Address` field from alarm JSON |
+| `%{json_chan}` | ✅ | ✅ | `Channel` field from alarm JSON |
+| `%{json_desc}` | ✅ | ✅ | `Descrip` field from alarm JSON |
+| `%{json_event}` | ✅ | ✅ | `Event` field from alarm JSON |
+| `%{json_serialid}` | ✅ | ✅ | `SerialID` field from alarm JSON |
+| `%{json_starttime}` | ✅ | ✅ | `StartTime` field from alarm JSON |
+| `%{json_status}` | ✅ | ✅ | `Status` field (`Start`/`Stop`) from alarm JSON |
+| `%{json_alarm}` | ✅ | ✅ | `Type`/alarm category from alarm JSON |
+| `%f` | ❌ | ✅ | Absolute path to finalized video file (script-only) |
+
+### 💡 Usage Examples
+
+**Filename format:**
+```ini
+filename_format=rec_%{cam_name}_%Y%m%d_%T_v%v_%e.mp4
+# Output: rec_FrontDoor_20260518_143022_v0_42.mp4
+```
+
+**Script command:**
+```ini
+on_video_save=/usr/local/bin/upload.sh -f %f -n %{cam_name} -t %{json_event}
 ```
 
 ---
 
-## Technical Stack
+## 🏗️ Architecture Overview
 
-| Component | Technology |
-|-----------|------------|
-| Language | C++17 |
-| Multimedia | FFmpeg (libavformat, libavcodec, libavutil) |
-| JSON | nlohmann/json 3.10.5+ |
-| Build System | CMake 3.14+ |
-| Threading | `std::thread`, `std::mutex`, `std::condition_variable`, `std::atomic` |
-| Network | POSIX sockets (TCP) |
-| Recording Mode | **Passthrough** (no transcoding) |
+```
+┌─────────────────┐     TCP:15002      ┌─────────────────┐
+│ Camera / VMS /  │  JSON Alarm Events │   AlarmServer   │
+│ Telegram Bot    │ ─────────────────► │ (TCP Listener)  │
+└─────────────────┘                    └────────┬────────┘
+                                                │
+                                                ▼
+                                     ┌─────────────────────┐
+                                     │   AlarmQueue        │
+                                     │ (thread-safe FIFO)  │
+                                     └────────┬────────────┘
+                                              │
+                                              ▼
+                                   ┌─────────────────────┐
+                                   │  CameraManager      │
+                                   │ (orchestrator)      │
+                                   └────────┬────────────┘
+                                            │
+              ┌─────────────────────────────┼─────────────────────────────┐
+              ▼                             ▼                             ▼
+    ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+    │  CameraNode #1  │    │  CameraNode #2  │    │  CameraNode #N  │
+    │ • RTSP reader   │    │ • RTSP reader   │    │ • RTSP reader   │
+    │ • Passthrough   │    │ • Passthrough   │    │ • Passthrough   │
+    │ • RecordingSession│  │ • RecordingSession│  │ • RecordingSession│
+    └────────┬────────┘    └────────┬────────┘    └────────┬────────┘
+             │                      │                      │
+             ▼                      ▼                      ▼
+    ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+    │ MP4 Chunk #1    │  │ MP4 Chunk #1    │  │ MP4 Chunk #1    │
+    │ (passthrough)   │  │ (passthrough)   │  │ (passthrough)   │
+    └─────────────────┘  └─────────────────┘  └─────────────────┘
+```
+
+**Critical design principle:** Video packets flow **unchanged** from RTSP stream to MP4 muxer. No decoding, no pixel buffers, no re-encoding — only PTS rebasing and container muxing.
 
 ---
 
-## Summary
+## 🧪 Technical Stack
 
-**ivckolpak** is a purpose-built, production-ready NVR solution designed for resource-constrained environments where CPU efficiency, video quality preservation, and external system integration are paramount. It is:
+| Component | Technology |
+|-----------|------------|
+| Language | **C++20** (`std::jthread`, `std::stop_token`, concepts-ready) |
+| Multimedia | FFmpeg (`libavformat`, `libavcodec`, `libavutil`) |
+| JSON | `nlohmann/json` ≥ 3.2.0 |
+| Build System | CMake ≥ 3.16 |
+| Threading | `std::mutex`, `std::condition_variable`, `std::atomic`, lock-free patterns |
+| Network | POSIX sockets (TCP), non-blocking I/O with timeouts |
+| Recording Mode | **Pure passthrough** — zero transcoding, bit-exact preservation |
 
-- ✅ **True passthrough** — zero transcoding, bit-perfect video preservation
-- ✅ **SBC-optimized** — runs comfortably on Raspberry Pi, Orange Pi, DietPi, and similar ARM devices
-- ✅ **Telegram bot ready** — native JSON/TCP interface with scriptable notifications
-- ✅ **I-frame accurate** — recordings always start and end on decodable keyframes
-- ✅ **Reconnection resilient** — survives RTSP drops without crashing or corrupting files
-- ✅ **Minimal overhead** — no decoding, no encoding, no pixel buffer allocations
-- ✅ **Deadlock-free** — verified through multiple professional code audits
-- ✅ **Graceful shutdown** — clean termination with proper cleanup of all resources
-- ✅ **22 macros across 6 event contexts** — flexible naming and script composition
-- ✅ **Open source** — clean, modern C++17 codebase, easy to audit and extend
+---
 
-The program is ready for 24/7 operation in video surveillance systems of any scale, from single-home setups to multi-camera SBC deployments.
+## 🎯 Why Choose ivckolpak?
+
+✅ **Zero CPU video processing** — ideal for Raspberry Pi, Orange Pi, Rockchip, Amlogic SBCs  
+✅ **Bit-perfect recordings** — no quality loss, no generation loss from re-encoding  
+✅ **Camera-native intelligence** — leverage built-in PIR, AI detection, not software heuristics  
+✅ **Telegram/VMS ready** — simple JSON/TCP interface, scriptable hooks for notifications  
+✅ **I-frame aligned** — recordings always start/end on decodable keyframes  
+✅ **Resilient by design** — exponential reconnect backoff, timeout protection, clean shutdown  
+✅ **Minimal memory footprint** — packet pooling, zero-copy stats, no frame buffers  
+✅ **Production-hardened** — deadlock-free threading, audited mutex usage, graceful degradation  
+✅ **Flexible naming** — 22 macros across filename and script contexts  
+✅ **Open & auditable** — clean modern C++20, no hidden dependencies, MIT-style clarity  
+
+*For questions, issues, or contributions, please open an issue or submit a pull request on GitHub.*
