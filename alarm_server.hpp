@@ -1,33 +1,32 @@
 #pragma once
-#include <string>
+#include "alarm_event.hpp"
 #include <thread>
-#include <atomic>
-#include <queue>
+#include <stop_token>
+#include <vector>
 #include <mutex>
-#include <condition_variable>
-#include <nlohmann/json.hpp>
-#include "event.hpp"
+#include <atomic>
+#include <functional>
+#include <string>
 
 class AlarmServer {
 public:
+    using AlarmCallback = std::function<void(AlarmEvent)>;
     explicit AlarmServer(int port);
     ~AlarmServer();
-
-    void start();
+    AlarmServer(const AlarmServer&) = delete;
+    AlarmServer& operator=(const AlarmServer&) = delete;
+    [[nodiscard]] bool start();
     void stop();
-    bool popEvent(AlarmEvent& evt);  // 🔧 Encapsulated event retrieval
-    void wakeUp();                    // 🔧 Wake up waiting thread
-
+    void setCallback(AlarmCallback cb);
 private:
-    void run();
-    void processBuffer();
+    void runListener(std::stop_token st);
+    void runClient(int fd, std::stop_token st);
+    void processBuffer(std::string& buf);
+    static size_t findJsonEnd(std::string_view data);
     int port_;
-    std::thread server_thread_;
-    std::atomic<bool> running_{false};
-    int server_fd_ = -1;
-    std::string recv_buffer_;
-
-    std::queue<AlarmEvent> event_queue_;
-    std::mutex queue_mutex_;
-    std::condition_variable cv_;
+    AlarmCallback callback_;
+    std::atomic<int> server_fd_{-1};
+    std::jthread listener_thread_;
+    mutable std::mutex clients_mtx_;
+    std::vector<std::jthread> client_threads_;
 };

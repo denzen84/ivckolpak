@@ -1,177 +1,129 @@
 #include "camera_manager.hpp"
 #include "utils.hpp"
-#include <iostream>
 #include <algorithm>
-#include <filesystem>
-#include <chrono>
 
-std::string buildRecordingPath(const CameraConfig& cfg, const AlarmEvent& evt, std::time_t timestamp) {
-    MacroContext ctx;
-    ctx.camera_id = evt.camera_id;
-    ctx.camera_name = cfg.id;
-    ctx.event_type = evt.event_type;
-    ctx.status = evt.status;
-    ctx.address = evt.address;
-    ctx.channel = evt.channel;
-    ctx.description = evt.description;
-    ctx.serial_id = evt.serial_id;
-    ctx.start_time = evt.start_time;
-    ctx.alarm_type = evt.alarm_type;
-    ctx.timestamp = timestamp;
+CameraManager::CameraManager(const ParsedConfig& cfg, AlarmQueue& q) : cfg_(cfg), queue_(q) {}
+CameraManager::~CameraManager() { stop(); }
 
-    std::string fmt = cfg.filename_format.empty() ? "rec_%t_%Y%m%d_%H%M%S.mp4" : cfg.filename_format;
-    std::string filename = sanitizeFilename(applyMacros(fmt, ctx));
-
-    std::string target = cfg.target_dir.empty() ? "/tmp" : cfg.target_dir;
-    if (!target.empty() && target.back() != '/') target += '/';
-    return target + filename;
-}
-
-void CameraManager::addCamera(const CameraConfig& cfg) {
-    if (!cfg.target_dir.empty() && !std::filesystem::exists(cfg.target_dir)) {
-        std::error_code ec;
-        std::filesystem::create_directories(cfg.target_dir, ec);
+bool CameraManager::initialize() {
+    nodes_.reserve(cfg_.cameras.size());
+    for (const auto& c : cfg_.cameras) {
+        int pre = c->pre_buffer_iframes>0 ? c->pre_buffer_iframes : cfg_.global->pre_buffer_iframes;
+        int post = c->post_buffer_iframes>0 ? c->post_buffer_iframes : cfg_.global->post_buffer_iframes;
+        auto n = std::make_unique<CameraNode>(c, pre, post);
+        if (!n->initialize()) return false;
+        nodes_.push_back(std::move(n));
     }
-    
-    rtsp_connection_state_[cfg.id] = false;
-    
-    // 🔧 FIX #1: buffer_frames → pre_buffer_iframes
-    cameras_[cfg.id] = std::make_unique<CameraNode>(
-        cfg.id, cfg.url, cfg.serial_id, cfg.ip_address, cfg.pre_buffer_iframes);
-    
-    // 🔧 Set up RTSP status callback
-    cameras_[cfg.id]->setOnRtspStatusChanged([this, id = cfg.id](bool connected) {
-        this->onRtspStatusChanged(id, connected);
-    });
-    
-    camera_configs_[cfg.id] = cfg;
-    std::cout << "[" << getTimestamp() << "] [Manager] Camera " << cfg.id << " registered.\n";
+    for (size_t i=0; i<cfg_.cameras.size(); ++i) {
+        auto& c = cfg_.cameras[i];
+        by_serial_[c->serialid]=i;
+        std::string h = extract_ip_hex_from_rtsp(c->rtsp_url);
+        by_hex_[h]=i;
+        by_dotted_[hexToIp(h)]=i;
+    }
+    return true;
 }
 
-void CameraManager::start(AlarmServer& server) {
-    for (auto& p : cameras_) p.second->start();
-    running_.store(true);
-    active_server_ = &server;
-    worker_thread_ = std::thread(&CameraManager::eventLoop, this);
-    std::cout << "[" << getTimestamp() << "] [Manager] Event loop started.\n";
+void CameraManager::start() {
+    if (alarm_thr_.joinable()) return;
+    for (auto& n : nodes_) n->start();
+    alarm_thr_ = std::jthread([this](std::stop_token st){ alarm_loop(st); });
+    monitor_thr_ = std::jthread([this](std::stop_token st){ monitor_loop(st); });
 }
 
 void CameraManager::stop() {
-    running_.store(false);
-    if (active_server_) active_server_->wakeUp();
-    
-    if (worker_thread_.joinable()) worker_thread_.join();
-
-    {
-        std::lock_guard<std::mutex> lock(sessions_mutex_);
-        for (auto& p : active_sessions_) p.second->requestStop();
-        active_sessions_.clear();
-    }
-    
-    for (auto& p : cameras_) p.second->stop();
-    ScriptRunner::joinAll();
-    std::cout << "[" << getTimestamp() << "] [Manager] Stopped.\n";
+    if (!alarm_thr_.joinable()) return;
+    LOG_INFO("MGR", "Stopping manager threads...");
+    alarm_thr_.request_stop();
+    monitor_thr_.request_stop();
+    LOG_INFO("MGR", "Waiting for threads to exit...");
+    alarm_thr_.join();
+    monitor_thr_.join();
+    LOG_INFO("MGR", "Threads stopped. Stopping nodes...");
+    for (auto& n : nodes_) n->stop();
+    { std::lock_guard lock(state_mtx_); active_.clear(); }
+    LOG_INFO("MGR", "Manager stopped cleanly.");
 }
 
-void CameraManager::onSessionFinished(const std::string& cam_id) {
-    std::lock_guard<std::mutex> lock(sessions_mutex_);
-    active_sessions_.erase(cam_id);
-    std::cout << "[" << getTimestamp() << "] [Manager] Session removed for " << cam_id << ".\n";
-}
-
-void CameraManager::onRtspStatusChanged(const std::string& cam_id, bool connected) {
-    DEBUG_LOG("CameraManager::onRtspStatusChanged: cam_id=" << cam_id << ", connected=" << connected);
-    
-    auto cfg_it = camera_configs_.find(cam_id);
-    if (cfg_it == camera_configs_.end()) return;
-    
-    const std::string& script = connected ? cfg_it->second.on_rtsp_found : cfg_it->second.on_rtsp_lost;
-    if (script.empty()) return;
-    
-    executeRtspScript(cam_id, script, connected);
-}
-
-void CameraManager::executeRtspScript(const std::string& cam_id, const std::string& tmpl, bool connected) {
-    if (tmpl.empty()) return;
-    
-    MacroContext ctx;
-    ctx.camera_id = cam_id;
-    ctx.camera_name = cam_id;
-    ctx.timestamp = std::time(nullptr);
-    ctx.rtsp_status = connected ? "connected" : "disconnected";
-    ctx.rtsp_event = connected ? "rtsp_found" : "rtsp_lost";
-    
-    std::string cmd = applyMacros(tmpl, ctx);
-    std::cout << "[" << getTimestamp() << "] [Manager] Executing RTSP script: " << cmd << "\n";
-    ScriptRunner::run(cmd);
-}
-
-void CameraManager::eventLoop() {
-    AlarmEvent evt;
-    auto last_cleanup = std::chrono::steady_clock::now();
-    
-    while (running_.load()) {
-        // 🔧 FIX #2: Use encapsulated popEvent() instead of direct queue access
-        if (!active_server_->popEvent(evt)) {
-            if (!running_.load()) break;
-            continue;
-        }
-        handleEvent(evt);
-        
-        // 🔧 Periodic cleanup of finished sessions (every 5 seconds)
-        auto now = std::chrono::steady_clock::now();
-        if (now - last_cleanup > std::chrono::seconds(5)) {
-            for (auto& [id, node] : cameras_) {
-                node->cleanupFinishedSessions();
+void CameraManager::alarm_loop(std::stop_token st) {
+    while (!st.stop_requested()) {
+        AlarmEvent evt;
+        if (queue_.try_pop(evt, std::chrono::milliseconds(100))) {
+            LOG_DEBUG("MGR", "Event popped: Serial=", evt.serial_id, " Status=", evt.status);
+            int idx = find_idx(evt.serial_id, evt.address, evt.address_ip);
+            if (idx < 0 || idx >= (int)nodes_.size()) {
+                LOG_WARN("MGR", "Unknown alarm: ", evt.serial_id);
+                continue;
             }
-            last_cleanup = now;
+            nodes_[idx]->on_alarm(evt);
+            std::lock_guard lock(state_mtx_);
+            if (evt.isStart()) {
+                double timeout = cfg_.global->max_event_total_duration_s;
+                if (idx >= 0 && idx < (int)cfg_.cameras.size()) {
+                    if (cfg_.cameras[idx]->max_event_total_duration_s > 0) {
+                        timeout = cfg_.cameras[idx]->max_event_total_duration_s;
+                    }
+                }
+                active_[evt.serial_id] = ActiveEvent{
+                    .start_time = std::chrono::steady_clock::now(),
+                    .node_idx = idx,
+                    .timeout_override = timeout
+                };
+            } else if (evt.isStop()) {
+                active_.erase(evt.serial_id);
+            }
         }
     }
 }
 
-void CameraManager::handleEvent(const AlarmEvent& evt) {
-    DEBUG_LOG("handleEvent: " << evt.camera_id << " " << evt.status);
-    
-    auto cfg_it = camera_configs_.find(evt.camera_id);
-    auto node_it = cameras_.find(evt.camera_id);
-    if (cfg_it == camera_configs_.end() || node_it == cameras_.end()) return;
-    
-    auto* node = node_it->second.get();
-    const auto& cfg = cfg_it->second;
+void CameraManager::monitor_loop(std::stop_token st) {
+    while (!st.stop_requested()) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        check_timeouts();
+    }
+}
 
-    std::lock_guard<std::mutex> lock(sessions_mutex_);
-    auto sess_it = active_sessions_.find(evt.camera_id);
-
-    if (evt.status == "Start") {
-        if (sess_it != active_sessions_.end()) return;
-        
-        std::string filename = buildRecordingPath(cfg, evt, std::time(nullptr));
-        DEBUG_LOG("Generated filename: " << filename);
-        
-        // 🔧 FIX #3: Use getCodecParamsCopy() instead of raw getContext/getVideoIdx
-        auto codec_params = node->getCodecParamsCopy();
-        if (!codec_params) return;
-        
-        auto sess = std::make_shared<RecordingSession>(
-            evt.camera_id, cfg.id, evt,  // 🔧 Pass original event for macros
-            codec_params.get(), filename, cfg.max_duration, cfg.max_chunks,
-            cfg.post_buffer_iframes, cfg.on_start, cfg.on_stop, cfg.on_save,
-            [this](const std::string& id){ this->onSessionFinished(id); }
-        );
-        
-        sess->start(node->getPreBuffer());
-        active_sessions_[evt.camera_id] = sess;
-        
-        // 🔥 CRITICAL: Add session to node so it receives live packets
-        node->addSession(sess);
-        
-        std::cout << "[" << getTimestamp() << "] [Manager] Recording started for " << evt.camera_id << "\n";
-    } 
-    else if (evt.status == "Stop") {
-        if (sess_it != active_sessions_.end()) {
-            sess_it->second->updateEventStatus(evt.status);
-            sess_it->second->requestStop();
-            std::cout << "[" << getTimestamp() << "] [Manager] Stop requested for " << evt.camera_id << "\n";
+void CameraManager::check_timeouts() {
+    if (cfg_.global->max_event_total_duration_s <= 0) return;
+    std::vector<AlarmEvent> timed_out_events;
+    {
+        std::lock_guard lock(state_mtx_);
+        auto now = std::chrono::steady_clock::now();
+        for (auto it = active_.begin(); it != active_.end(); ) {
+            const auto& active_evt = it->second;
+            double elapsed = std::chrono::duration<double>(now - active_evt.start_time).count();
+            if (elapsed >= active_evt.timeout_override) {
+                LOG_WARN("MGR", "⏱ TIMEOUT: ", it->first, " (", (int)elapsed,
+                         "s >= ", (int)active_evt.timeout_override, "s). Forcing STOP.");
+                AlarmEvent e;
+                e.serial_id = it->first;
+                e.status = "Stop";
+                e.type = "Alarm";
+                e.event_type = "Timeout";
+                timed_out_events.push_back(e);
+                it = active_.erase(it);
+            } else {
+                ++it;
+            }
         }
+    }
+    for (auto& evt : timed_out_events) {
+        queue_.push(std::move(evt));
+    }
+}
+
+int CameraManager::find_idx(const std::string& s, const std::string& h, const std::string& d) const {
+    auto it = by_serial_.find(s);
+    if (it!=by_serial_.end()) return (int)it->second;
+    it = by_hex_.find(h);
+    if (it!=by_hex_.end()) return (int)it->second;
+    it = by_dotted_.find(d);
+    if (it!=by_dotted_.end()) return (int)it->second;
+    return -1;
+}
+
+void CameraManager::collect_stats(std::function<void(const CameraStats&)> consumer) const {
+    for (auto& n : nodes_) {
+        n->collect_stats(consumer);
     }
 }

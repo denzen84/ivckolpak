@@ -1,37 +1,32 @@
 #pragma once
-#include <string>
-#include <vector>
-#include <mutex>
-#include <memory>
-#include <functional>
-#include "utils.hpp"
-#include "rtsp_camera_stream.hpp"
+#include "rtsp_stream.hpp"
 #include "recording_session.hpp"
+#include "stats.hpp"
+#include "config.h"
+#include "logger.hpp"
+#include <memory>
+#include <atomic>
+#include <functional>
 
 class CameraNode {
 public:
-    using OnRtspStatusCallback = std::function<void(bool connected)>;
-    
-    CameraNode(const std::string& id, const std::string& url, const std::string& serial, 
-               const std::string& ip, int buffer_frames);
-    void start(); 
+    explicit CameraNode(std::shared_ptr<const CameraConfig> cfg, int pre_iframes, int post_iframes);
+    ~CameraNode();
+    CameraNode(const CameraNode&) = delete;
+    CameraNode& operator=(const CameraNode&) = delete;
+    bool initialize();
+    void start();
     void stop();
-    
-    void addSession(std::shared_ptr<RecordingSession> s);
-    void cleanupFinishedSessions();  // 🔧 New method for periodic cleanup
-    void setOnRtspStatusChanged(OnRtspStatusCallback cb) { on_rtsp_status_ = std::move(cb); }
-    
-    std::vector<SafePacket> getPreBuffer() const;
-    std::unique_ptr<AVCodecParameters> getCodecParamsCopy() const;
-    
-    const std::string& getSerialId() const { return serial_id_; }
-    const std::string& getIpAddress() const { return ip_address_; }
-    const std::string& getId() const { return id_; }
-
+    void on_alarm(const AlarmEvent& evt);
+    [[nodiscard]] bool is_alive() const;
+    [[nodiscard]] const std::string& name() const;
+    [[nodiscard]] const std::string& serial_id() const;
+    void collect_stats(std::function<void(const CameraStats&)> consumer) const;
 private:
-    std::string id_, serial_id_, ip_address_;
-    RtspCameraStream stream_;
-    std::vector<std::shared_ptr<RecordingSession>> sessions_;
-    mutable std::mutex sessions_mtx_;
-    OnRtspStatusCallback on_rtsp_status_;
+    void on_packet(AVPacket* pkt);
+    std::shared_ptr<const CameraConfig> cfg_;
+    RTSPStream stream_;
+    std::unique_ptr<RecordingSession> session_;
+    std::atomic<bool> initialized_{false};
+    std::atomic<int> event_counter_{0};
 };
