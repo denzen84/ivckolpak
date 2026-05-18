@@ -45,6 +45,7 @@ public:
     void start_event(const AlarmEvent& evt,
                      const AVCodecParameters* codec_params,
                      const RTSPStream::StreamInfo& stream_info);
+    void continue_event(const AlarmEvent& evt);
     void stop_event();
     void shutdown();
     [[nodiscard]] State current_state() const noexcept { return state_.load(std::memory_order_acquire); }

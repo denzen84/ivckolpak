@@ -8,6 +8,8 @@
 #include <cstring>
 #include <algorithm>
 #include <nlohmann/json.hpp>
+#include <sstream>
+#include <iomanip>
 
 AlarmServer::AlarmServer(int port) : port_(port) {}
 AlarmServer::~AlarmServer() { stop(); }
@@ -122,7 +124,34 @@ void AlarmServer::processBuffer(std::string& buffer) {
                 evt.start_time  = j.value("StartTime", "");
                 evt.status      = j.value("Status", "");
                 evt.type        = j.value("Type", "");
-                LOG_DEBUG("ALARM", "Parsed: Type=", evt.type, " | Status=", evt.status, " | Serial=", evt.serial_id);
+                
+                if (!evt.address.empty() && evt.address.length() >= 10) {
+                    try {
+                        uint32_t v_le = std::stoul(evt.address.substr(2), nullptr, 16);
+                        uint32_t v_be = ((v_le & 0xFF) << 24) | 
+                                       ((v_le & 0xFF00) << 8) | 
+                                       ((v_le & 0xFF0000) >> 8) | 
+                                       ((v_le & 0xFF000000) >> 24);
+                        std::ostringstream oss;
+                        oss << "0x" << std::hex << std::uppercase 
+                            << std::setw(8) << std::setfill('0') << v_be;
+                        evt.address = oss.str();
+                        
+                        char buf[16];
+                        std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+                                     (v_be >> 24) & 0xFF,
+                                     (v_be >> 16) & 0xFF,
+                                     (v_be >> 8) & 0xFF,
+                                     v_be & 0xFF);
+                        evt.address_ip = buf;
+                        LOG_DEBUG("ALARM", "Converted LE address to BE: ", evt.address, " -> ", evt.address_ip);
+                    } catch (...) {
+                        LOG_WARN("ALARM", "Failed to convert address: ", evt.address);
+                    }
+                }
+                
+                LOG_DEBUG("ALARM", "Parsed: Type=", evt.type, " | Status=", evt.status, 
+                          " | Serial=", evt.serial_id, " | IP=", evt.address_ip);
                 callback_(std::move(evt));
             }
         } catch (const nlohmann::json::parse_error& e) {

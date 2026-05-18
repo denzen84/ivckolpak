@@ -5,6 +5,7 @@
 #include <sstream>
 #include <iomanip>
 #include <chrono>
+#include <ctime>
 #include "logger.hpp"
 
 inline std::string timestamp_now() {
@@ -23,8 +24,10 @@ inline std::string hexToIp(const std::string& hex) {
         uint32_t v = std::stoul(hex.substr(2), nullptr, 16);
         char buf[16];
         std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
-                      v & 0xFF, (v >> 8) & 0xFF,
-                      (v >> 16) & 0xFF, (v >> 24) & 0xFF);
+                      (v >> 24) & 0xFF,
+                      (v >> 16) & 0xFF,
+                      (v >> 8) & 0xFF,
+                      v & 0xFF);
         return buf;
     } catch (...) {
         return "0.0.0.0";
@@ -34,6 +37,11 @@ inline std::string hexToIp(const std::string& hex) {
 inline void execute_script_async(const std::string& cmd, const CameraConfig& cfg, const AlarmEvent* evt=nullptr, const std::string& fp="") {
     if (cmd.empty()) return;
     std::string r = cmd;
+    
+    std::time_t now = std::time(nullptr);
+    std::tm tm = *std::localtime(&now);
+    char time_buf[32];
+    
     auto rep = [&](const std::string& t, const std::string& v) {
         size_t p = 0;
         while ((p = r.find(t, p)) != std::string::npos) {
@@ -41,6 +49,28 @@ inline void execute_script_async(const std::string& cmd, const CameraConfig& cfg
             p += v.length();
         }
     };
+    
+    std::strftime(time_buf, sizeof(time_buf), "%Y", &tm);
+    rep("%Y", time_buf);
+    
+    std::strftime(time_buf, sizeof(time_buf), "%m", &tm);
+    rep("%m", time_buf);
+    
+    std::strftime(time_buf, sizeof(time_buf), "%d", &tm);
+    rep("%d", time_buf);
+    
+    std::strftime(time_buf, sizeof(time_buf), "%H", &tm);
+    rep("%H", time_buf);
+    
+    std::strftime(time_buf, sizeof(time_buf), "%M", &tm);
+    rep("%M", time_buf);
+    
+    std::strftime(time_buf, sizeof(time_buf), "%S", &tm);
+    rep("%S", time_buf);
+    
+    std::strftime(time_buf, sizeof(time_buf), "%H:%M:%S", &tm);
+    rep("%T", time_buf);
+    
     rep("%{cam_name}", cfg.name);
     rep("%{cam_id}", cfg.serialid);
     rep("%{cam_ip}", extract_ip_hex_from_rtsp(cfg.rtsp_url));

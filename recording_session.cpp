@@ -79,17 +79,16 @@ void RecordingSession::start_event(const AlarmEvent& evt,
                                    const RTSPStream::StreamInfo& stream_info) {
     std::lock_guard lock(buffer_mtx_);
     State current = state_.load(std::memory_order_acquire);
+    
     if (current == State::RECORDING || current == State::POST_BUFFER) {
-        LOG_WARN("SESSION", "Force-stopping previous event for new START");
-        finalize_file();
-        pre_buffer_.clear();
-        post_buffer_.clear();
-        pre_buffer_iframe_count_ = 0;
-        post_buffer_iframe_count_ = 0;
+        LOG_INFO("SESSION", "Event already in progress, will be handled by continue_event()");
+        return;
     }
+    
     current_event_id_++;
     current_event_ = evt;
-    LOG_INFO("SESSION", "🎬 Starting event #", current_event_id_, ": ", evt.event_type);
+    LOG_INFO("SESSION", "Starting event #", current_event_id_, ": ", evt.event_type);
+    
     if (codec_params) {
         stored_codec_params_ = std::unique_ptr<AVCodecParameters, std::function<void(AVCodecParameters*)>>(
             avcodec_parameters_alloc(), codec_params_deleter);
@@ -105,12 +104,14 @@ void RecordingSession::start_event(const AlarmEvent& evt,
     } else {
         LOG_WARN("SESSION", "Stream info invalid, using defaults");
     }
+    
     chunk_idx_ = 0;
     chunk_bytes_ = 0;
     event_start_time_ = std::chrono::steady_clock::now();
     analyzer_ = StreamAnalyzer{};
     analyzer_.time_base = stored_time_base_;
     init_muxer(codec_params);
+    
     LOG_DEBUG("SESSION", "Draining ", pre_buffer_.size(), " packets from pre-buffer");
     for (auto& pkt : pre_buffer_) {
         if (pkt.pkt) {
@@ -124,7 +125,30 @@ void RecordingSession::start_event(const AlarmEvent& evt,
     pre_buffer_iframe_count_ = 0;
     current_buffer_bytes_ = 0;
     state_.store(State::RECORDING, std::memory_order_release);
-    LOG_INFO("SESSION", "State: PRE_BUFFER → RECORDING");
+    LOG_INFO("SESSION", "State: PRE_BUFFER -> RECORDING");
+}
+
+void RecordingSession::continue_event(const AlarmEvent& evt) {
+    std::lock_guard lock(buffer_mtx_);
+    State current = state_.load(std::memory_order_acquire);
+    
+    if (current == State::IDLE || current == State::PRE_BUFFER) {
+        LOG_WARN("SESSION", "continue_event called but not recording, ignoring");
+        return;
+    }
+    
+    if (current == State::POST_BUFFER) {
+        LOG_INFO("SESSION", "Continuing event: canceling post-buffer, returning to RECORDING");
+        post_buffer_.clear();
+        post_buffer_iframe_count_ = 0;
+        state_.store(State::RECORDING, std::memory_order_release);
+        LOG_INFO("SESSION", "State: POST_BUFFER -> RECORDING (continued)");
+    } else {
+        LOG_INFO("SESSION", "Continuing event: already RECORDING, extending duration");
+    }
+    
+    current_event_ = evt;
+    LOG_DEBUG("SESSION", "Event continued with type: ", evt.event_type);
 }
 
 void RecordingSession::stop_event() {
@@ -134,11 +158,11 @@ void RecordingSession::stop_event() {
         LOG_WARN("SESSION", "STOP event ignored, not in RECORDING state");
         return;
     }
-    LOG_INFO("SESSION", "⏹ Stopping event, collecting ", cfg_.post_buffer_iframes, " post-frames");
+    LOG_INFO("SESSION", "Stopping event, collecting ", cfg_.post_buffer_iframes, " post-frames");
     post_buffer_.clear();
     post_buffer_iframe_count_ = 0;
     state_.store(State::POST_BUFFER, std::memory_order_release);
-    LOG_INFO("SESSION", "State: RECORDING → POST_BUFFER");
+    LOG_INFO("SESSION", "State: RECORDING -> POST_BUFFER");
 }
 
 void RecordingSession::shutdown() {
@@ -224,7 +248,7 @@ void RecordingSession::transition_to_idle() {
     post_buffer_.clear();
     post_buffer_iframe_count_ = 0;
     state_.store(State::PRE_BUFFER, std::memory_order_release);
-    LOG_INFO("SESSION", "State: POST_BUFFER → PRE_BUFFER");
+    LOG_INFO("SESSION", "State: POST_BUFFER -> PRE_BUFFER");
 }
 
 void RecordingSession::init_muxer(const AVCodecParameters* codec_params) {
@@ -314,7 +338,7 @@ void RecordingSession::finalize_file() {
     LOG_DEBUG("SESSION", "Finalizing file: ", path);
     if (analyzer_.detected_fps.num > 0) {
         out_stream_->avg_frame_rate = analyzer_.detected_fps;
-        LOG_INFO("SESSION", "📊 Detected FPS: ", analyzer_.get_fps());
+        LOG_INFO("SESSION", "Detected FPS: ", analyzer_.get_fps());
     }
     int ret = av_write_trailer(out_fmt_ctx_.get());
     if (ret < 0) {
@@ -332,7 +356,7 @@ void RecordingSession::finalize_file() {
     out_stream_ = nullptr;
     bool file_ok = (ret >= 0) && !path.empty();
     if (file_ok) {
-        LOG_INFO("SESSION", "✅ Saved: ", path);
+        LOG_INFO("SESSION", "Saved: ", path);
         if (cfg_.on_video_save) {
             LOG_DEBUG("SESSION", "Calling on_video_save callback for: ", path);
             try {
@@ -342,14 +366,14 @@ void RecordingSession::finalize_file() {
                 LOG_ERROR("SESSION", "on_video_save callback threw exception: ", e.what());
             }
         } else {
-            LOG_WARN("SESSION", "⚠️ on_video_save callback is NULL (not set)");
+            LOG_WARN("SESSION", "on_video_save callback is NULL (not set)");
         }
     } else {
         if (!path.empty()) {
             std::filesystem::remove(path);
-            LOG_WARN("SESSION", "❌ Deleted corrupted file: ", path);
+            LOG_WARN("SESSION", "Deleted corrupted file: ", path);
         } else {
-            LOG_WARN("SESSION", "⚠️ finalize_file: path is empty");
+            LOG_WARN("SESSION", "finalize_file: path is empty");
         }
     }
     chunk_start_pts_ = AV_NOPTS_VALUE;
@@ -384,7 +408,7 @@ void RecordingSession::StreamAnalyzer::finalize() {
         else if (std::abs(fps - 20.0) < 1.0) fps = 20.0;
         detected_fps = AVRational{static_cast<int>(fps * 1000), 1000};
         LOG_DEBUG("ANALYZER", "Using time_base ", time_base.num, "/", time_base.den,
-                  " | Median PTS diff: ", median_diff, " → FPS: ", fps);
+                  " | Median PTS diff: ", median_diff, " -> FPS: ", fps);
     }
 }
 

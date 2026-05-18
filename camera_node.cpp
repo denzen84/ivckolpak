@@ -49,21 +49,35 @@ void CameraNode::stop() {
 
 void CameraNode::on_alarm(const AlarmEvent& evt) {
     if (!initialized_.load(std::memory_order_acquire) || !stream_.is_alive()) return;
+    
     if (evt.isStart()) {
-        int current_event_id = event_counter_.fetch_add(1, std::memory_order_relaxed) + 1;
-        LOG_INFO("NODE", "🎬 ALARM START #", current_event_id, ": ", evt.event_type, " [", cfg_->name, "]");
-        if (!cfg_->on_event_start.empty()) {
-            execute_script_async(cfg_->on_event_start, *cfg_, &evt);
-        }
-        auto codec_params = stream_.get_codec_params();
-        auto stream_info = stream_.get_stream_info();
-        if (codec_params && stream_info.valid) {
-            session_->start_event(evt, codec_params.get(), stream_info);
+        auto current_state = session_->current_state();
+        
+        if (current_state == RecordingSession::State::RECORDING || 
+            current_state == RecordingSession::State::POST_BUFFER) {
+            LOG_INFO("NODE", "ALARM START during active recording: ", evt.event_type, 
+                     " [", cfg_->name, "] - CONTINUING event");
+            if (!cfg_->on_event_start.empty()) {
+                execute_script_async(cfg_->on_event_start, *cfg_, &evt);
+            }
+            session_->continue_event(evt);
         } else {
-            LOG_ERROR("NODE", "Cannot start recording: missing codec params or stream info");
+            int current_event_id = event_counter_.fetch_add(1, std::memory_order_relaxed) + 1;
+            LOG_INFO("NODE", "ALARM START #", current_event_id, ": ", evt.event_type, 
+                     " [", cfg_->name, "]");
+            if (!cfg_->on_event_start.empty()) {
+                execute_script_async(cfg_->on_event_start, *cfg_, &evt);
+            }
+            auto codec_params = stream_.get_codec_params();
+            auto stream_info = stream_.get_stream_info();
+            if (codec_params && stream_info.valid) {
+                session_->start_event(evt, codec_params.get(), stream_info);
+            } else {
+                LOG_ERROR("NODE", "Cannot start recording: missing codec params or stream info");
+            }
         }
     } else if (evt.isStop()) {
-        LOG_INFO("NODE", "⏹ ALARM STOP: ", evt.event_type, " [", cfg_->name, "]");
+        LOG_INFO("NODE", "ALARM STOP: ", evt.event_type, " [", cfg_->name, "]");
         if (!cfg_->on_event_stop.empty()) {
             execute_script_async(cfg_->on_event_stop, *cfg_, &evt);
         }
