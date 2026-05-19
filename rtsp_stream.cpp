@@ -52,46 +52,55 @@ RTSPStream::StreamInfo RTSPStream::get_stream_info() const {
 void RTSPStream::run(std::stop_token st) {
     int reconnect_attempts = 0;
     int64_t current_delay = cfg_.reconnect_delay_ms;
-    bool first_connection = true;
+    bool was_connected = false;
+    
     while (!st.stop_requested()) {
         if (!open_input()) {
             close_input();
             alive_.store(false, std::memory_order_release);
+            
+            if (was_connected && !cfg_.on_rtsp_lost.empty() && cfg_.camera_config) {
+                LOG_INFO("RTSP", "Connection failed, calling on_rtsp_lost callback");
+                execute_script_async(cfg_.on_rtsp_lost, *cfg_.camera_config);
+                was_connected = false;
+            }
+            
             if (cfg_.max_reconnect_attempts > 0 && reconnect_attempts >= cfg_.max_reconnect_attempts) {
                 LOG_ERROR("RTSP", "Max reconnect attempts reached.");
                 return;
             }
-            if (!cfg_.on_rtsp_lost.empty() && cfg_.camera_config) {
-                LOG_DEBUG("RTSP", "Calling on_rtsp_lost callback");
-                execute_script_async(cfg_.on_rtsp_lost, *cfg_.camera_config);
-            }
+            
             LOG_WARN("RTSP", "Reconnecting in ", current_delay, "ms (attempt ", reconnect_attempts + 1, ")");
             std::this_thread::sleep_for(std::chrono::milliseconds(current_delay));
             current_delay = std::min(current_delay * 2, static_cast<int64_t>(cfg_.reconnect_max_delay_ms));
             reconnect_attempts++;
             continue;
         }
+        
         reconnect_attempts = 0;
         current_delay = cfg_.reconnect_delay_ms;
         alive_.store(true, std::memory_order_release);
-        if (!cfg_.on_rtsp_found.empty() && cfg_.camera_config) {
-            if (first_connection) {
-                LOG_DEBUG("RTSP", "Calling on_rtsp_found callback (FIRST connection)");
-            } else {
-                LOG_DEBUG("RTSP", "Calling on_rtsp_found callback (reconnect)");
-            }
+        
+        if (!was_connected && !cfg_.on_rtsp_found.empty() && cfg_.camera_config) {
+            LOG_INFO("RTSP", "Successfully connected, calling on_rtsp_found callback");
             execute_script_async(cfg_.on_rtsp_found, *cfg_.camera_config);
         }
-        first_connection = false;
+        was_connected = true;
+        
         LOG_INFO("RTSP", "Connected to stream.");
         AVPacket* pkt = PacketPool::instance().acquire();
+        
+        bool connection_lost = false;
         while (!st.stop_requested()) {
             int ret = av_read_frame(fmt_ctx_, pkt);
             if (ret < 0) {
-                if (ret == AVERROR_EXIT || st.stop_requested()) break;
+                if (ret == AVERROR_EXIT || st.stop_requested()) {
+                    break;
+                }
                 char err[128];
                 av_strerror(ret, err, sizeof(err));
-                LOG_WARN("RTSP", "Read failed: ", err);
+                LOG_ERROR("RTSP", "Read failed: ", err, " (code: ", ret, ")");
+                connection_lost = true;
                 break;
             }
             if (pkt->stream_index == video_stream_idx_) {
@@ -101,10 +110,22 @@ void RTSPStream::run(std::stop_token st) {
             }
             av_packet_unref(pkt);
         }
+        
         PacketPool::instance().release(pkt);
         close_input();
         alive_.store(false, std::memory_order_release);
-        if (!st.stop_requested()) LOG_WARN("RTSP", "Connection lost. Reconnecting...");
+        
+        if (connection_lost && !st.stop_requested() && was_connected) {
+            if (!cfg_.on_rtsp_lost.empty() && cfg_.camera_config) {
+                LOG_WARN("RTSP", "Connection lost during operation, calling on_rtsp_lost callback");
+                execute_script_async(cfg_.on_rtsp_lost, *cfg_.camera_config);
+                was_connected = false;
+            }
+            LOG_WARN("RTSP", "Connection lost. Attempting to reconnect...");
+        } else if (st.stop_requested()) {
+            LOG_INFO("RTSP", "Stop requested, exiting normally");
+            break;
+        }
     }
 }
 
@@ -120,12 +141,16 @@ bool RTSPStream::open_input() {
     AVDictionary* opts = nullptr;
     av_dict_set(&opts, "rtsp_transport", cfg_.tcp_only ? "tcp" : "udp", 0);
     av_dict_set_int(&opts, "stimeout", cfg_.timeout_ms * 1000LL, 0);
+    av_dict_set(&opts, "reconnect", "1", 0);
+    av_dict_set(&opts, "reconnect_streamed", "1", 0);
+    av_dict_set(&opts, "reconnect_delay_max", "2", 0);
+    
     int ret = avformat_open_input(&raw_ctx, cfg_.url.c_str(), nullptr, &opts);
     av_dict_free(&opts);
     if (ret < 0) {
         char e[128];
         av_strerror(ret, e, sizeof(e));
-        LOG_ERROR("RTSP", "Open failed: ", e);
+        LOG_ERROR("RTSP", "Open failed: ", e, " (code: ", ret, ")");
         avformat_free_context(raw_ctx);
         return false;
     }
