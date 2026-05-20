@@ -6,6 +6,7 @@
 #include <mutex>
 #include <functional>
 #include <memory>
+#include <chrono>
 #include "logger.hpp"
 
 extern "C" {
@@ -23,6 +24,7 @@ public:
         int reconnect_delay_ms = 3000;
         int reconnect_max_delay_ms = 30000;
         int max_reconnect_attempts = 0;
+        int read_timeout_ms = 10000;
         std::string on_rtsp_lost;
         std::string on_rtsp_found;
         std::shared_ptr<const CameraConfig> camera_config;
@@ -44,6 +46,7 @@ public:
     [[nodiscard]] StreamInfo get_stream_info() const;
 private:
     void run(std::stop_token st);
+    void watchdog_loop(std::stop_token st);
     bool open_input();
     void close_input();
     static int interrupt_cb(void* ctx) {
@@ -51,6 +54,7 @@ private:
     }
     Config cfg_;
     std::jthread worker_;
+    std::jthread watchdog_;
     mutable std::mutex io_mtx_;
     std::atomic<bool> alive_{false};
     AVFormatContext* fmt_ctx_ = nullptr;
@@ -61,4 +65,6 @@ private:
     bool stream_info_valid_ = false;
     PacketCallback packet_cb_;
     std::atomic<bool> interrupt_flag_{false};
+    std::atomic<uint64_t> last_packet_time_ms_{0};
+    std::atomic<bool> watchdog_enabled_{false};
 };

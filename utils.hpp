@@ -12,8 +12,10 @@ inline std::string timestamp_now() {
     auto now = std::chrono::system_clock::now();
     auto t = std::chrono::system_clock::to_time_t(now);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    std::tm tm;
+    localtime_r(&t, &tm);
     std::ostringstream o;
-    o << std::put_time(std::localtime(&t), "%Y-%m-%d %H:%M:%S")
+    o << std::put_time(&tm, "%Y-%m-%d %H:%M:%S")
       << '.' << std::setfill('0') << std::setw(3) << ms.count();
     return o.str();
 }
@@ -39,7 +41,8 @@ inline void execute_script_async(const std::string& cmd, const CameraConfig& cfg
     std::string r = cmd;
     
     std::time_t now = std::time(nullptr);
-    std::tm tm = *std::localtime(&now);
+    std::tm tm;
+    localtime_r(&now, &tm);
     char time_buf[32];
     
     auto rep = [&](const std::string& t, const std::string& v) {

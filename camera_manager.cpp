@@ -85,7 +85,7 @@ void CameraManager::monitor_loop(std::stop_token st) {
 
 void CameraManager::check_timeouts() {
     if (cfg_.global->max_event_total_duration_s <= 0) return;
-    std::vector<AlarmEvent> timed_out_events;
+    std::vector<std::pair<std::string, int>> timed_out;
     {
         std::lock_guard lock(state_mtx_);
         auto now = std::chrono::steady_clock::now();
@@ -93,22 +93,22 @@ void CameraManager::check_timeouts() {
             const auto& active_evt = it->second;
             double elapsed = std::chrono::duration<double>(now - active_evt.start_time).count();
             if (elapsed >= active_evt.timeout_override) {
-                LOG_WARN("MGR", "⏱ TIMEOUT: ", it->first, " (", (int)elapsed,
+                LOG_WARN("MGR", "TIMEOUT: ", it->first, " (", (int)elapsed,
                          "s >= ", (int)active_evt.timeout_override, "s). Forcing STOP.");
-                AlarmEvent e;
-                e.serial_id = it->first;
-                e.status = "Stop";
-                e.type = "Alarm";
-                e.event_type = "Timeout";
-                timed_out_events.push_back(e);
+                timed_out.push_back({it->first, active_evt.node_idx});
                 it = active_.erase(it);
             } else {
                 ++it;
             }
         }
     }
-    for (auto& evt : timed_out_events) {
-        queue_.push(std::move(evt));
+    for (auto& [serial_id, node_idx] : timed_out) {
+        AlarmEvent e;
+        e.serial_id = serial_id;
+        e.status = "Stop";
+        e.type = "Alarm";
+        e.event_type = "Timeout";
+        nodes_[node_idx]->on_alarm(e);
     }
 }
 

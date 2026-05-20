@@ -10,6 +10,7 @@ CameraNode::CameraNode(std::shared_ptr<const CameraConfig> cfg, int pre, int pos
           .tcp_only=true,
           .reconnect_delay_ms=cfg->reconnect_delay_ms>0?cfg->reconnect_delay_ms:3000,
           .reconnect_max_delay_ms=cfg->reconnect_max_delay_ms>0?cfg->reconnect_max_delay_ms:30000,
+          .read_timeout_ms=10000,
           .on_rtsp_lost=cfg->on_rtsp_lost,
           .on_rtsp_found=cfg->on_rtsp_found,
           .camera_config=cfg
@@ -48,7 +49,21 @@ void CameraNode::stop() {
 }
 
 void CameraNode::on_alarm(const AlarmEvent& evt) {
-    if (!initialized_.load(std::memory_order_acquire) || !stream_.is_alive()) return;
+    if (!initialized_.load(std::memory_order_acquire)) return;
+    
+    if (evt.isStop()) {
+        LOG_INFO("NODE", "ALARM STOP: ", evt.event_type, " [", cfg_->name, "]");
+        if (!cfg_->on_event_stop.empty()) {
+            execute_script_async(cfg_->on_event_stop, *cfg_, &evt);
+        }
+        session_->stop_event();
+        return;
+    }
+    
+    if (!stream_.is_alive()) {
+        LOG_WARN("NODE", "Ignoring ALARM START - stream not alive [", cfg_->name, "]");
+        return;
+    }
     
     if (evt.isStart()) {
         auto current_state = session_->current_state();
@@ -76,12 +91,6 @@ void CameraNode::on_alarm(const AlarmEvent& evt) {
                 LOG_ERROR("NODE", "Cannot start recording: missing codec params or stream info");
             }
         }
-    } else if (evt.isStop()) {
-        LOG_INFO("NODE", "ALARM STOP: ", evt.event_type, " [", cfg_->name, "]");
-        if (!cfg_->on_event_stop.empty()) {
-            execute_script_async(cfg_->on_event_stop, *cfg_, &evt);
-        }
-        session_->stop_event();
     }
 }
 
@@ -106,8 +115,6 @@ void CameraNode::collect_stats(std::function<void(const CameraStats&)> consumer)
             fps = av_q2d(stream_info.frame_rate);
         }
     }
-    LOG_DEBUG("NODE_STATS", "Camera '", cfg_->name, "' (len=", cfg_->name.length(),
-              ") serial='", cfg_->serialid, "'");
     CameraStats stats{
         .name = cfg_->name,
         .serial_id = cfg_->serialid,

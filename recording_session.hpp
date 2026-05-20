@@ -47,6 +47,7 @@ public:
                      const RTSPStream::StreamInfo& stream_info);
     void continue_event(const AlarmEvent& evt);
     void stop_event();
+    void force_stop();
     void shutdown();
     [[nodiscard]] State current_state() const noexcept { return state_.load(std::memory_order_acquire); }
     [[nodiscard]] Stats get_stats() const;
@@ -85,10 +86,10 @@ private:
     void add_to_pre_buffer(Packet&& pkt);
     void drop_oldest_gop_from_pre_buffer();
     bool add_to_post_buffer(Packet&& pkt);
-    void transition_to_idle();
     void init_muxer(const AVCodecParameters* codec_params);
     void write_packet_to_file(AVPacket* pkt);
-    void finalize_file();
+    void finalize_and_rotate();
+    bool finalize_file_io(const std::string& path);
     Config cfg_;
     std::atomic<State> state_{State::PRE_BUFFER};
     mutable std::mutex buffer_mtx_;
