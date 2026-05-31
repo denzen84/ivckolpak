@@ -13,7 +13,9 @@ CameraNode::CameraNode(std::shared_ptr<const CameraConfig> cfg, int pre, int pos
           .read_timeout_ms=10000,
           .on_rtsp_lost=cfg->on_rtsp_lost,
           .on_rtsp_found=cfg->on_rtsp_found,
-          .camera_config=cfg
+          .camera_config=cfg,
+          .internal_lost_callback=[this]() { this->on_rtsp_connection_lost(); },
+          .internal_found_callback=[this]() { this->on_rtsp_connection_restored(); }
       }) {
     RecordingSession::Config session_cfg{
         .camera_cfg = cfg,
@@ -46,6 +48,24 @@ void CameraNode::stop() {
     if (!initialized_.exchange(false, std::memory_order_acq_rel)) return;
     stream_.stop();
     session_->shutdown();
+}
+
+void CameraNode::on_rtsp_connection_lost() {
+    if (!initialized_.load(std::memory_order_acquire)) return;
+    
+    LOG_WARN("NODE", "RTSP connection lost for camera [", cfg_->name, "] - forcing recording stop");
+    
+    session_->force_stop();
+}
+
+void CameraNode::on_rtsp_connection_restored() {
+    if (!initialized_.load(std::memory_order_acquire)) return;
+    
+    LOG_INFO("NODE", "RTSP connection restored for camera [", cfg_->name, "]");
+}
+
+uint64_t CameraNode::get_total_bytes_read() const {
+    return stream_.get_total_bytes_read();
 }
 
 void CameraNode::on_alarm(const AlarmEvent& evt) {
@@ -101,13 +121,27 @@ const std::string& CameraNode::serial_id() const { return cfg_->serialid; }
 void CameraNode::collect_stats(std::function<void(const CameraStats&)> consumer) const {
     auto session_stats = session_->get_stats();
     SessionState state;
+    
     switch (session_stats.state) {
-        case RecordingSession::State::IDLE: state = SessionState::IDLE; break;
-        case RecordingSession::State::PRE_BUFFER: state = SessionState::PRE_BUFFER; break;
-        case RecordingSession::State::RECORDING: state = SessionState::RECORDING; break;
-        case RecordingSession::State::POST_BUFFER: state = SessionState::POST_BUFFER; break;
-        default: state = SessionState::IDLE;
+        case RecordingSession::State::IDLE: 
+            state = SessionState::IDLE; 
+            break;
+        case RecordingSession::State::PRE_BUFFER: 
+            state = SessionState::PRE_BUFFER; 
+            break;
+        case RecordingSession::State::RECORDING: 
+            state = SessionState::RECORDING; 
+            break;
+        case RecordingSession::State::FINALIZING:
+            state = SessionState::FINALIZING; 
+            break;
+        case RecordingSession::State::POST_BUFFER: 
+            state = SessionState::POST_BUFFER; 
+            break;
+        default: 
+            state = SessionState::IDLE;
     }
+    
     double fps = session_stats.detected_fps;
     if (fps == 0.0) {
         auto stream_info = stream_.get_stream_info();
@@ -115,6 +149,7 @@ void CameraNode::collect_stats(std::function<void(const CameraStats&)> consumer)
             fps = av_q2d(stream_info.frame_rate);
         }
     }
+    
     CameraStats stats{
         .name = cfg_->name,
         .serial_id = cfg_->serialid,
@@ -123,6 +158,7 @@ void CameraNode::collect_stats(std::function<void(const CameraStats&)> consumer)
         .buffer_kb = session_stats.buffer_kb,
         .total_pushed_frames = session_stats.total_pushed_frames,
         .total_written_kb = session_stats.total_written_kb,
+        .total_read_bytes = stream_.get_total_bytes_read(),
         .detected_fps = fps,
         .rtsp_connected = stream_.is_alive()
     };

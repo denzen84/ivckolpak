@@ -42,6 +42,12 @@ void RecordingSession::push_packet(AVPacket* pkt) {
                 add_to_pre_buffer(std::move(packet));
                 break;
                 
+            case State::FINALIZING:
+                LOG_DEBUG("SESSION", "Dropping packet during finalization");
+                av_packet_free(&packet.pkt);
+                packet.pkt = nullptr;
+                break;
+                
             case State::RECORDING:
                 analyzer_.analyze_packet(pkt);
                 write_packet_to_file(packet.pkt);
@@ -86,13 +92,19 @@ void RecordingSession::push_packet(AVPacket* pkt) {
 void RecordingSession::finalize_and_rotate() {
     std::string path_to_finalize;
     std::function<void(const std::string&)> callback_copy;
+    State previous_state;
     
     {
         std::lock_guard lock(buffer_mtx_);
         State current = state_.load(std::memory_order_acquire);
+        previous_state = current;
         
         if (current == State::RECORDING) {
             if (!out_fmt_ctx_) return;
+            
+            LOG_DEBUG("SESSION", "State transition: RECORDING -> FINALIZING");
+            state_.store(State::FINALIZING, std::memory_order_release);
+            
             path_to_finalize = current_filename_;
             callback_copy = cfg_.on_video_save;
             
@@ -107,6 +119,10 @@ void RecordingSession::finalize_and_rotate() {
                 state_.store(State::PRE_BUFFER, std::memory_order_release);
                 return;
             }
+            
+            LOG_DEBUG("SESSION", "State transition: POST_BUFFER -> FINALIZING");
+            state_.store(State::FINALIZING, std::memory_order_release);
+            
             path_to_finalize = current_filename_;
             callback_copy = cfg_.on_video_save;
             
@@ -122,24 +138,26 @@ void RecordingSession::finalize_and_rotate() {
     
     {
         std::lock_guard lock(buffer_mtx_);
-        State current = state_.load(std::memory_order_acquire);
         
         out_fmt_ctx_.reset();
         out_stream_ = nullptr;
         chunk_start_pts_ = AV_NOPTS_VALUE;
         
-        if (current == State::RECORDING) {
+        if (previous_state == State::RECORDING) {
             chunk_idx_++;
             chunk_bytes_ = 0;
             event_start_time_ = std::chrono::steady_clock::now();
             if (stored_codec_params_) {
                 init_muxer(stored_codec_params_.get());
             }
-        } else if (current == State::POST_BUFFER) {
+            LOG_DEBUG("SESSION", "State transition: FINALIZING -> RECORDING (rotated)");
+            state_.store(State::RECORDING, std::memory_order_release);
+        } else if (previous_state == State::POST_BUFFER) {
             post_buffer_.clear();
             post_buffer_iframe_count_ = 0;
+            LOG_DEBUG("SESSION", "State transition: FINALIZING -> PRE_BUFFER");
             state_.store(State::PRE_BUFFER, std::memory_order_release);
-            LOG_INFO("SESSION", "State: POST_BUFFER -> PRE_BUFFER");
+            LOG_INFO("SESSION", "Recording finalized, returning to PRE_BUFFER");
         }
     }
     
@@ -193,7 +211,7 @@ void RecordingSession::start_event(const AlarmEvent& evt,
     std::lock_guard lock(buffer_mtx_);
     State current = state_.load(std::memory_order_acquire);
     
-    if (current == State::RECORDING || current == State::POST_BUFFER) {
+    if (current == State::RECORDING || current == State::POST_BUFFER || current == State::FINALIZING) {
         LOG_INFO("SESSION", "Event already in progress, will be handled by continue_event()");
         return;
     }
@@ -250,6 +268,12 @@ void RecordingSession::continue_event(const AlarmEvent& evt) {
         return;
     }
     
+    if (current == State::FINALIZING) {
+        LOG_WARN("SESSION", "continue_event called during finalization, will apply after rotation");
+        current_event_ = evt;
+        return;
+    }
+    
     if (current == State::POST_BUFFER) {
         LOG_INFO("SESSION", "Continuing event: canceling post-buffer, returning to RECORDING");
         post_buffer_.clear();
@@ -278,6 +302,11 @@ void RecordingSession::stop_event() {
         return;
     }
     
+    if (current == State::FINALIZING) {
+        LOG_INFO("SESSION", "STOP event during finalization, will transition to POST_BUFFER after rotation");
+        return;
+    }
+    
     LOG_INFO("SESSION", "Stopping event, collecting ", cfg_.post_buffer_iframes, " post-frames");
     post_buffer_.clear();
     post_buffer_iframe_count_ = 0;
@@ -298,6 +327,8 @@ void RecordingSession::force_stop() {
         }
         
         LOG_WARN("SESSION", "FORCE_STOP: Scheduling finalization from state ", (int)current);
+        
+        state_.store(State::FINALIZING, std::memory_order_release);
         
         if (out_fmt_ctx_) {
             path_to_finalize = current_filename_;
@@ -321,6 +352,10 @@ void RecordingSession::force_stop() {
         state_.store(State::PRE_BUFFER, std::memory_order_release);
         LOG_INFO("SESSION", "State: FORCE_STOP -> PRE_BUFFER");
     }
+    
+    if (!path_to_finalize.empty() && callback_copy) {
+        callback_copy(path_to_finalize);
+    }
 }
 
 void RecordingSession::shutdown() {
@@ -329,8 +364,8 @@ void RecordingSession::shutdown() {
     std::string path_to_finalize;
     {
         std::lock_guard lock(buffer_mtx_);
-        if (state_.load(std::memory_order_acquire) == State::RECORDING ||
-            state_.load(std::memory_order_acquire) == State::POST_BUFFER) {
+        State current = state_.load(std::memory_order_acquire);
+        if (current == State::RECORDING || current == State::POST_BUFFER || current == State::FINALIZING) {
             if (out_fmt_ctx_) {
                 path_to_finalize = current_filename_;
             }

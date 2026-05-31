@@ -33,10 +33,11 @@ void print_help() {
         "direct alternative to motion. It utilizes full hardware passthrough mode to\n"
         "record directly to disk without decoding, relying on native camera alarms.\n\n"
         "Command-line options:\n"
-        "  -c, --config <file>   Specify path to configuration file (default: ivckolpak.ini)\n"
-        "  -s, --silent          Disable console output (equivalent to disable_logs=yes)\n"
-        "  --help-full           Show detailed INI format, options, and macros reference\n"
-        "  -h, --help            Show this help message and exit\n"
+        "  -c, --config <file>      Specify path to configuration file (default: ivckolpak.ini)\n"
+        "  -s, --silent             Disable console output (equivalent to disable_logs=yes)\n"
+        "  --stats-every <sec>      Statistics output interval in seconds (overrides config)\n"
+        "  --help-full              Show detailed INI format, options, and macros reference\n"
+        "  -h, --help               Show this help message and exit\n"
         << std::endl;
 }
 
@@ -66,6 +67,7 @@ void print_full_help() {
         "  max_event_chunks=5            : Max number of chunks per alarm event.\n"
         "  reconnect_delay_ms=3000       : Initial RTSP reconnect delay (ms).\n"
         "  reconnect_max_delay_ms=30000  : Max RTSP reconnect backoff delay (ms).\n"
+        "  stats_every_sec=2             : Statistics output interval (seconds).\n"
         "  target_dir=\"/mnt/recordings\"  : Directory to save recorded video files.\n"
         "  filename_format=...           : Output filename template (see macros below).\n"
         "  on_event_start=\"\"             : Shell command executed on recording start.\n"
@@ -121,6 +123,7 @@ void print_full_help() {
 int main(int argc, char* argv[]) {
     std::string config_path = "ivckolpak.ini";
     bool cli_silent = false;
+    int cli_stats_every = -1; 
 
     // Parse command-line arguments
     for (int i = 1; i < argc; ++i) {
@@ -139,13 +142,34 @@ int main(int argc, char* argv[]) {
             config_path = arg.substr(9);
         } else if (arg.find("-c=") == 0) {
             config_path = arg.substr(3);
+        } else if ((arg == "--stats-every") && i + 1 < argc) {
+            try {
+                cli_stats_every = std::stoi(argv[++i]);
+                if (cli_stats_every <= 0) {
+                    std::cerr << "Error: --stats-every must be positive" << std::endl;
+                    return 1;
+                }
+            } catch (...) {
+                std::cerr << "Error: invalid --stats-every value" << std::endl;
+                return 1;
+            }
+        } else if (arg.find("--stats-every=") == 0) {
+            try {
+                cli_stats_every = std::stoi(arg.substr(14));
+                if (cli_stats_every <= 0) {
+                    std::cerr << "Error: --stats-every must be positive" << std::endl;
+                    return 1;
+                }
+            } catch (...) {
+                std::cerr << "Error: invalid --stats-every value" << std::endl;
+                return 1;
+            }
         } else {
             std::cerr << "Unknown argument: " << arg << "\nUse --help for usage information." << std::endl;
             return 1;
         }
     }
 
-    // Apply CLI silent flag early
     if (cli_silent) {
         Logger::set_enabled(false);
     }
@@ -166,9 +190,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Apply config-based silent flag (CLI takes precedence if already set)
     if (cfg.global->disable_logs) {
         Logger::set_enabled(false);
+    }
+
+    int stats_interval = (cli_stats_every > 0) ? cli_stats_every : cfg.global->stats_every_sec;
+    if (stats_interval <= 0) {
+        stats_interval = 2;
     }
 
     AlarmQueue queue;
@@ -189,24 +217,42 @@ int main(int argc, char* argv[]) {
     }
 
     LOG_INFO("MAIN", "System running on port ", cfg.global->alarm_server_port);
+    LOG_INFO("MAIN", "Statistics interval: ", stats_interval, " seconds");
 
-    // Statistics thread (runs every 2 seconds)
-    std::jthread stats([&mgr](std::stop_token st) {
+    std::jthread stats([&mgr, stats_interval](std::stop_token st) {
         while (!st.stop_requested()) {
-            for (int i = 0; i < 20 && !st.stop_requested(); ++i)
+            for (int i = 0; i < stats_interval * 10 && !st.stop_requested(); ++i)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             if (st.stop_requested()) break;
+            
             try {
-                mgr.collect_stats([](const CameraStats& s) {
+                uint64_t total_read_bytes = 0;
+                uint64_t total_written_bytes = 0;
+                
+                mgr.collect_stats([&](const CameraStats& s) {
+                    total_read_bytes += s.total_read_bytes;
+                    total_written_bytes += s.total_written_kb * 1024;
+                    
                     LOG_INFO("STATS",
                              std::left, std::setw(10), s.name, " | ",
                              std::setw(5), s.state_str(), " | ",
                              "Buf:", s.buffer_iframes, "I/", s.buffer_kb, "KB | ",
                              "Pushed:", s.total_pushed_frames, " | ",
                              "Written:", s.total_written_kb, "KB | ",
+                             "Read:", s.total_read_bytes / 1024, "KB | ",
                              "FPS:", std::fixed, std::setprecision(1), s.detected_fps, " | ",
                              "RTSP:", (s.rtsp_connected ? "OK" : "OFF"));
                 });
+                
+                double ratio = (total_read_bytes > 0) 
+                    ? static_cast<double>(total_written_bytes) / static_cast<double>(total_read_bytes)
+                    : 0.0;
+                    
+                LOG_INFO("STATS_TOTAL",
+                         "=== TOTAL: Read: ", total_read_bytes, " bytes | ",
+                         "Written: ", total_written_bytes, " bytes | ",
+                         "Ratio: ", std::fixed, std::setprecision(4), ratio, " ===");
+                
             } catch (const std::exception& e) {
                 LOG_ERROR("STATS", "Failed to get stats: ", e.what());
             }

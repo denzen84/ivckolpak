@@ -7,9 +7,12 @@
 #include <cerrno>
 #include <cstring>
 #include <algorithm>
-#include <nlohmann/json.hpp>
 #include <sstream>
 #include <iomanip>
+
+extern "C" {
+#include "json.h"
+}
 
 AlarmServer::AlarmServer(int port) : port_(port) {}
 AlarmServer::~AlarmServer() { stop(); }
@@ -112,19 +115,42 @@ void AlarmServer::processBuffer(std::string& buffer) {
         if (end == 0) return;
         std::string json_str = buffer.substr(0, end);
         buffer.erase(0, end);
-        try {
-            auto j = nlohmann::json::parse(json_str);
-            if (j.value("Type", "") == "Alarm") {
-                AlarmEvent evt;
-                evt.address     = j.value("Address", "");
-                evt.channel     = j.value("Channel", 0);
-                evt.description = j.value("Descrip", "");
-                evt.event_type  = j.value("Event", "");
-                evt.serial_id   = j.value("SerialID", "");
-                evt.start_time  = j.value("StartTime", "");
-                evt.status      = j.value("Status", "");
-                evt.type        = j.value("Type", "");
+        
+        json_value_s* root = json_parse(json_str.c_str(), json_str.length());
+        if (!root) {
+            LOG_WARN("ALARM", "JSON parse error");
+            continue;
+        }
+        
+        json_object_s* obj = json_value_as_object(root);
+        if (obj) {
+            AlarmEvent evt;
+            
+            for (json_object_element_s* elem = obj->start; elem; elem = elem->next) {
+                std::string key(elem->name->string, elem->name->string_size);
+                json_string_s* str_val = json_value_as_string(elem->value);
+                json_number_s* num_val = json_value_as_number(elem->value);
                 
+                if (key == "Type" && str_val) {
+                    evt.type.assign(str_val->string, str_val->string_size);
+                } else if (key == "Address" && str_val) {
+                    evt.address.assign(str_val->string, str_val->string_size);
+                } else if (key == "Channel" && num_val) {
+                    evt.channel = std::stoi(std::string(num_val->number, num_val->number_size));
+                } else if (key == "Descrip" && str_val) {
+                    evt.description.assign(str_val->string, str_val->string_size);
+                } else if (key == "Event" && str_val) {
+                    evt.event_type.assign(str_val->string, str_val->string_size);
+                } else if (key == "SerialID" && str_val) {
+                    evt.serial_id.assign(str_val->string, str_val->string_size);
+                } else if (key == "StartTime" && str_val) {
+                    evt.start_time.assign(str_val->string, str_val->string_size);
+                } else if (key == "Status" && str_val) {
+                    evt.status.assign(str_val->string, str_val->string_size);
+                }
+            }
+            
+            if (evt.type == "Alarm") {
                 if (!evt.address.empty() && evt.address.length() >= 10) {
                     try {
                         uint32_t v_le = std::stoul(evt.address.substr(2), nullptr, 16);
@@ -154,11 +180,9 @@ void AlarmServer::processBuffer(std::string& buffer) {
                           " | Serial=", evt.serial_id, " | IP=", evt.address_ip);
                 callback_(std::move(evt));
             }
-        } catch (const nlohmann::json::parse_error& e) {
-            LOG_WARN("ALARM", "JSON parse error: ", e.what());
-        } catch (const std::exception& e) {
-            LOG_ERROR("ALARM", "Exception: ", e.what());
         }
+        
+        free(root);
     }
 }
 

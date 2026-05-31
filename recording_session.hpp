@@ -21,7 +21,9 @@ extern "C" {
 
 class RecordingSession {
 public:
-    enum class State { IDLE, PRE_BUFFER, RECORDING, POST_BUFFER };
+
+    enum class State { IDLE, PRE_BUFFER, RECORDING, FINALIZING, POST_BUFFER };
+    
     struct Config {
         std::shared_ptr<const CameraConfig> camera_cfg;
         int pre_buffer_iframes;
@@ -91,7 +93,9 @@ private:
     void finalize_and_rotate();
     bool finalize_file_io(const std::string& path);
     Config cfg_;
+    
     std::atomic<State> state_{State::PRE_BUFFER};
+    
     mutable std::mutex buffer_mtx_;
     std::deque<Packet> pre_buffer_;
     std::deque<Packet> post_buffer_;

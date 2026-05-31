@@ -28,6 +28,8 @@ public:
         std::string on_rtsp_lost;
         std::string on_rtsp_found;
         std::shared_ptr<const CameraConfig> camera_config;
+        std::function<void()> internal_lost_callback;    
+        std::function<void()> internal_found_callback;   
     };
     struct StreamInfo {
         AVRational time_base;
@@ -44,6 +46,9 @@ public:
     [[nodiscard]] bool is_alive() const noexcept;
     [[nodiscard]] std::unique_ptr<AVCodecParameters, std::function<void(AVCodecParameters*)>> get_codec_params() const;
     [[nodiscard]] StreamInfo get_stream_info() const;
+    [[nodiscard]] uint64_t get_total_bytes_read() const noexcept {  
+        return total_bytes_read_.load(std::memory_order_relaxed);
+    }
 private:
     void run(std::stop_token st);
     void watchdog_loop(std::stop_token st);
@@ -67,4 +72,5 @@ private:
     std::atomic<bool> interrupt_flag_{false};
     std::atomic<uint64_t> last_packet_time_ms_{0};
     std::atomic<bool> watchdog_enabled_{false};
+    std::atomic<uint64_t> total_bytes_read_{0}; 
 };

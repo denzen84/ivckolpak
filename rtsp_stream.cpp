@@ -88,9 +88,9 @@ void RTSPStream::watchdog_loop(std::stop_token st) {
         auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         auto last_packet_ms = last_packet_time_ms_.load(std::memory_order_acquire);
-        auto elapsed = now_ms - last_packet_ms;
+        uint64_t elapsed = static_cast<uint64_t>(now_ms - last_packet_ms);  
         
-        if (elapsed > cfg_.read_timeout_ms) {
+        if (elapsed > static_cast<uint64_t>(cfg_.read_timeout_ms)) { 
             LOG_ERROR("RTSP_WD", "TIMEOUT! No data received for ", elapsed, "ms (limit: ", 
                      cfg_.read_timeout_ms, "ms). Forcing disconnect.");
             interrupt_flag_.store(true, std::memory_order_release);
@@ -100,6 +100,7 @@ void RTSPStream::watchdog_loop(std::stop_token st) {
     
     LOG_DEBUG("RTSP_WD", "Watchdog stopped");
 }
+
 
 void RTSPStream::run(std::stop_token st) {
     int reconnect_attempts = 0;
@@ -115,6 +116,12 @@ void RTSPStream::run(std::stop_token st) {
             alive_.store(false, std::memory_order_release);
             
             if (was_connected) {
+
+                if (cfg_.internal_lost_callback) {
+                    LOG_DEBUG("RTSP", "Calling internal_lost_callback");
+                    cfg_.internal_lost_callback();
+                }
+                
                 if (!cfg_.on_rtsp_lost.empty() && cfg_.camera_config) {
                     LOG_WARN("RTSP", "Calling on_rtsp_lost callback");
                     execute_script_async(cfg_.on_rtsp_lost, *cfg_.camera_config);
@@ -143,6 +150,12 @@ void RTSPStream::run(std::stop_token st) {
         alive_.store(true, std::memory_order_release);
         
         if (!was_connected) {
+      
+            if (cfg_.internal_found_callback) {
+                LOG_DEBUG("RTSP", "Calling internal_found_callback");
+                cfg_.internal_found_callback();
+            }
+            
             if (!cfg_.on_rtsp_found.empty() && cfg_.camera_config) {
                 LOG_INFO("RTSP", "Calling on_rtsp_found callback");
                 execute_script_async(cfg_.on_rtsp_found, *cfg_.camera_config);
@@ -201,6 +214,9 @@ void RTSPStream::run(std::stop_token st) {
             last_packet_time_ms_.store(now_ms, std::memory_order_release);
             
             if (pkt->stream_index == video_stream_idx_) {
+
+                total_bytes_read_.fetch_add(pkt->size, std::memory_order_relaxed);
+                
                 AVPacket* clone = av_packet_clone(pkt);
                 if (clone && packet_cb_) {
                     packet_cb_(clone);
@@ -218,6 +234,12 @@ void RTSPStream::run(std::stop_token st) {
         
         if (connection_lost && !st.stop_requested()) {
             if (was_connected) {
+
+                if (cfg_.internal_lost_callback) {
+                    LOG_DEBUG("RTSP", "Connection lost during operation, calling internal_lost_callback");
+                    cfg_.internal_lost_callback();
+                }
+                
                 if (!cfg_.on_rtsp_lost.empty() && cfg_.camera_config) {
                     LOG_WARN("RTSP", "Connection lost during operation, calling on_rtsp_lost callback");
                     execute_script_async(cfg_.on_rtsp_lost, *cfg_.camera_config);
