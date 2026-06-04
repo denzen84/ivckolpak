@@ -24,13 +24,16 @@
 ### Dependencies (Debian/Ubuntu)
 ```bash
 sudo apt install build-essential pkg-config cmake \
-                 libavformat-dev libavcodec-dev libavutil-dev \
-                 nlohmann-json3-dev
+                 libavformat-dev libavcodec-dev libavutil-dev
 ```
 
 ### Standard Build
 ```bash
+git clone https://github.com/sheredom/json.h.git
 git clone https://github.com/denzen84/ivckolpak.git
+
+copy json.h into ivckolpak dir
+
 cd ivckolpak
 mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
