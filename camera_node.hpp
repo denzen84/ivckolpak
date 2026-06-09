@@ -18,12 +18,12 @@ public:
     void start();
     void stop();
     void on_alarm(const AlarmEvent& evt);
-    void on_rtsp_connection_lost();      // NEW
-    void on_rtsp_connection_restored();  // NEW
+    void on_rtsp_connection_lost();      
+    void on_rtsp_connection_restored();  
     [[nodiscard]] bool is_alive() const;
     [[nodiscard]] const std::string& name() const;
     [[nodiscard]] const std::string& serial_id() const;
-    [[nodiscard]] uint64_t get_total_bytes_read() const;  // NEW
+    [[nodiscard]] uint64_t get_total_bytes_read() const; 
     void collect_stats(std::function<void(const CameraStats&)> consumer) const;
 private:
     void on_packet(AVPacket* pkt);

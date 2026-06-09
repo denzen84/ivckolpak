@@ -92,6 +92,8 @@ private:
     void write_packet_to_file(AVPacket* pkt);
     void finalize_and_rotate();
     bool finalize_file_io(const std::string& path);
+    void emergency_clear_pre_buffer(uint64_t target_bytes);  
+    void emergency_clear_pre_buffer_by_count(size_t target_count); 
     Config cfg_;
     
     std::atomic<State> state_{State::PRE_BUFFER};

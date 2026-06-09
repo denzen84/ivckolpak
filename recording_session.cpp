@@ -8,6 +8,9 @@
 static auto codec_params_deleter = [](AVCodecParameters* p) { if (p) avcodec_parameters_free(&p); };
 static auto fmt_ctx_deleter = [](AVFormatContext* f) { if (f) avformat_free_context(f); };
 
+constexpr uint64_t MAX_PRE_BUFFER_BYTES = 50 * 1024 * 1024; 
+constexpr size_t MAX_PRE_BUFFER_PACKETS = 500; 
+
 RecordingSession::RecordingSession(Config cfg) : cfg_(std::move(cfg)) {
     std::filesystem::create_directories(cfg_.camera_cfg->target_dir);
     LOG_INFO("SESSION", "Created for camera: ", cfg_.camera_cfg->name);
@@ -20,7 +23,16 @@ void RecordingSession::push_packet(AVPacket* pkt) {
         if (pkt) av_packet_free(&pkt);
         return;
     }
+
+    constexpr int MAX_REASONABLE_PACKET_SIZE = 1 * 1024 * 1024; // 1 MB
+    if (pkt->size == 0 || pkt->size > MAX_REASONABLE_PACKET_SIZE) {
+        LOG_WARN("SESSION", "Dropping abnormal packet: size=", pkt->size, " bytes");
+        av_packet_free(&pkt);
+        return;
+    }
+
     local_pushed_frames_++;
+
     if (local_pushed_frames_ % 30 == 0) {
         total_pushed_frames_.store(local_pushed_frames_, std::memory_order_relaxed);
     }
@@ -403,37 +415,100 @@ auto RecordingSession::get_stats() const -> Stats {
     };
 }
 
+// ИСПРАВЛЕНО: защита от утечки памяти при битых потоках без I-кадров
 void RecordingSession::add_to_pre_buffer(Packet&& pkt) {
     if (!pkt.pkt) return;
+    
     current_buffer_bytes_ += pkt.size;
     if (pkt.is_keyframe) {
         pre_buffer_iframe_count_++;
     }
     pre_buffer_.push_back(std::move(pkt));
+    
+
     while (pre_buffer_iframe_count_ > cfg_.pre_buffer_iframes) {
         drop_oldest_gop_from_pre_buffer();
     }
+
+    if (current_buffer_bytes_ > MAX_PRE_BUFFER_BYTES) {
+        LOG_WARN("SESSION", "PRE_BUFFER exceeds ", MAX_PRE_BUFFER_BYTES / (1024*1024), 
+                 " MB (", current_buffer_bytes_ / (1024*1024), " MB). Emergency cleanup.");
+        emergency_clear_pre_buffer(MAX_PRE_BUFFER_BYTES / 2); // Сбросить до 50%
+    }
+    
+
+    if (pre_buffer_.size() > MAX_PRE_BUFFER_PACKETS) {
+        LOG_ERROR("SESSION", "PRE_BUFFER contains ", pre_buffer_.size(), 
+                  " packets without I-frames! Clearing 50% oldest packets.");
+        emergency_clear_pre_buffer_by_count(MAX_PRE_BUFFER_PACKETS / 2);
+    }
+}
+
+
+void RecordingSession::emergency_clear_pre_buffer(uint64_t target_bytes) {
+    while (!pre_buffer_.empty() && current_buffer_bytes_ > target_bytes) {
+        auto& front = pre_buffer_.front();
+        if (front.is_keyframe) {
+            pre_buffer_iframe_count_--;
+        }
+        current_buffer_bytes_ -= front.size;
+        pre_buffer_.pop_front();
+    }
+    LOG_WARN("SESSION", "Emergency cleanup: pre_buffer reduced to ", 
+             current_buffer_bytes_ / 1024, " KB, ", pre_buffer_.size(), " packets");
+}
+
+
+void RecordingSession::emergency_clear_pre_buffer_by_count(size_t target_count) {
+    while (pre_buffer_.size() > target_count) {
+        auto& front = pre_buffer_.front();
+        if (front.is_keyframe) {
+            pre_buffer_iframe_count_--;
+        }
+        current_buffer_bytes_ -= front.size;
+        pre_buffer_.pop_front();
+    }
+    LOG_WARN("SESSION", "Emergency cleanup by count: pre_buffer reduced to ", 
+             pre_buffer_.size(), " packets");
 }
 
 void RecordingSession::drop_oldest_gop_from_pre_buffer() {
     if (pre_buffer_.empty()) return;
-    auto it = pre_buffer_.begin();
-    while (it != pre_buffer_.end() && !it->is_keyframe) {
-        current_buffer_bytes_ -= it->size;
-        ++it;
+    
+    // Ищем первый I-кадр
+    auto first_keyframe = pre_buffer_.begin();
+    while (first_keyframe != pre_buffer_.end() && !first_keyframe->is_keyframe) {
+        ++first_keyframe;
     }
-    pre_buffer_.erase(pre_buffer_.begin(), it);
-    if (it == pre_buffer_.end()) return;
+    
+    if (first_keyframe == pre_buffer_.end()) {
+        size_t to_remove = std::max<size_t>(1, pre_buffer_.size() / 4);
+        LOG_WARN("SESSION", "No I-frames in pre_buffer (", pre_buffer_.size(), 
+                 " packets). Force-removing oldest ", to_remove, " packets.");
+        
+        for (size_t i = 0; i < to_remove && !pre_buffer_.empty(); ++i) {
+            current_buffer_bytes_ -= pre_buffer_.front().size;
+            pre_buffer_.pop_front();
+        }
+        return;
+    }
+    
+    for (auto it = pre_buffer_.begin(); it != first_keyframe; ++it) {
+        current_buffer_bytes_ -= it->size;
+    }
+    pre_buffer_.erase(pre_buffer_.begin(), first_keyframe);
+    
     bool keyframe_removed = false;
-    it = pre_buffer_.begin();
+    auto it = pre_buffer_.begin();
     while (it != pre_buffer_.end()) {
         if (it->is_keyframe) {
-            if (keyframe_removed) break;
+            if (keyframe_removed) break; 
             keyframe_removed = true;
         }
         current_buffer_bytes_ -= it->size;
         it = pre_buffer_.erase(it);
     }
+    
     if (keyframe_removed) {
         pre_buffer_iframe_count_--;
     }

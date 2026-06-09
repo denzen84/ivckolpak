@@ -267,15 +267,18 @@ bool RTSPStream::open_input() {
     raw_ctx->interrupt_callback = { interrupt_cb, &interrupt_flag_ };
     
     AVDictionary* opts = nullptr;
-    
+
     av_dict_set(&opts, "rtsp_transport", cfg_.tcp_only ? "tcp" : "udp", 0);
     av_dict_set_int(&opts, "stimeout", cfg_.timeout_ms * 1000LL, 0);
     av_dict_set_int(&opts, "rw_timeout", cfg_.timeout_ms * 1000LL, 0);
-    av_dict_set(&opts, "max_delay", "500000", 0);
+
+    av_dict_set(&opts, "fflags", "nobuffer+discardcorrupt", 0);  
+    av_dict_set(&opts, "err_detect", "ignore_err", 0);           
+    av_dict_set_int(&opts, "max_delay", 200000, 0);              
+
     av_dict_set(&opts, "reorder_queue_size", "0", 0);
     av_dict_set(&opts, "buffer_size", "1024000", 0);
     av_dict_set(&opts, "rtsp_flags", "prefer_tcp", 0);
-    av_dict_set(&opts, "fflags", "nobuffer", 0);
     av_dict_set(&opts, "flags", "low_delay", 0);
     
     int ret = avformat_open_input(&raw_ctx, cfg_.url.c_str(), nullptr, &opts);
